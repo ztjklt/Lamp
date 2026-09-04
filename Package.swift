@@ -10,7 +10,7 @@ let package = Package(
             name: "LampCore",
             path: "Lamp",
             exclude: [
-                "AgentAPIClient.swift", "AppIntents.swift", "DesignSystem.swift", "ImageIngestionService.swift", "Info.plist", "LampActivityAttributes.swift", "LampActivityManager.swift", "LampApp.swift", "LampStore.swift",
+                "AgentAPIClient.swift", "AppIntents.swift", "DesignSystem.swift", "ImageIngestionService.swift", "Info.plist", "Lamp.entitlements", "LampActivityAttributes.swift", "LampActivityManager.swift", "LampApp.swift", "LampStore.swift",
                 "MemoryView.swift", "OnboardingView.swift", "ReplanView.swift", "RoadmapView.swift",
                 "RootView.swift", "SpeechService.swift", "TellLampView.swift", "TodayView.swift", "WeekView.swift"
             ],

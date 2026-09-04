@@ -1,4 +1,5 @@
 import ActivityKit
+import Foundation
 
 enum LampActivityManager {
     static func start(for block: ScheduleBlock) async throws {
@@ -15,5 +16,14 @@ enum LampActivityManager {
             content: ActivityContent(state: state, staleDate: block.end),
             pushType: nil
         )
+    }
+
+    static func update(blockID: UUID, status: String) async {
+        guard let activity = Activity<LampActivityAttributes>.activities.first(where: {
+            $0.content.state.taskID == blockID.uuidString
+        }) else { return }
+        var state = activity.content.state
+        state.status = status
+        await activity.update(ActivityContent(state: state, staleDate: state.endDate))
     }
 }

@@ -6,10 +6,11 @@ struct OnboardingView: View {
     @State private var context = "学生"
     @State private var wakeTime = Date.now
     @State private var sleepTime = Calendar.current.date(bySettingHour: 23, minute: 30, second: 0, of: .now)!
+    @State private var scheduleSource = "稍后设置"
 
     var body: some View {
         ZStack {
-            LampTheme.background.ignoresSafeArea()
+            LampBackground()
             VStack(spacing: 0) {
                 HStack {
                     LampLight(size: 30)
@@ -27,16 +28,27 @@ struct OnboardingView: View {
 
                 HStack(spacing: 12) {
                     if page > 0 {
-                        Button("返回") { withAnimation { page -= 1 } }
-                            .buttonStyle(.bordered).tint(LampTheme.ink)
+                        Button("返回") { withAnimation(.snappy) { page -= 1 } }
+                            .buttonStyle(.lamp)
+                            .accessibilityIdentifier("onboarding.back")
                     }
                     Button(page == 2 ? "看看今天" : "继续") {
-                        if page == 2 { store.finishOnboarding() } else { withAnimation { page += 1 } }
+                        if page == 2 {
+                            store.finishOnboarding(profile: OnboardingProfile(
+                                context: context,
+                                wakeTime: wakeTime,
+                                sleepTime: sleepTime,
+                                scheduleSource: scheduleSource
+                            ))
+                        } else {
+                            withAnimation(.snappy) { page += 1 }
+                        }
                     }
-                    .buttonStyle(.borderedProminent).tint(LampTheme.ink)
+                    .buttonStyle(.lampProminent)
                     .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier(page == 2 ? "onboarding.finish" : "onboarding.continue")
                 }
-                .controlSize(.large).padding(24)
+                .padding(24)
             }
         }
     }
@@ -76,10 +88,21 @@ struct OnboardingView: View {
                         Text("学生").tag("学生")
                         Text("工作").tag("工作")
                         Text("其他").tag("其他")
-                    }.pickerStyle(.segmented)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("onboarding.context")
                     Divider()
                     DatePicker("通常起床", selection: $wakeTime, displayedComponents: .hourAndMinute)
+                        .accessibilityIdentifier("onboarding.wakeTime")
                     DatePicker("通常休息", selection: $sleepTime, displayedComponents: .hourAndMinute)
+                        .accessibilityIdentifier("onboarding.sleepTime")
+                    Divider()
+                    Picker("日程来源", selection: $scheduleSource) {
+                        Text("稍后设置").tag("稍后设置")
+                        Text("系统日历").tag("系统日历")
+                        Text("照片课表").tag("照片课表")
+                    }
+                    .accessibilityIdentifier("onboarding.scheduleSource")
                 }
             }
             Text("日历、照片、麦克风等权限只会在你使用相关功能时询问。")
@@ -113,7 +136,6 @@ struct OnboardingView: View {
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 16)
-        .background(.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18))
+        .background(LampTheme.secondaryBackground.opacity(0.78), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
-

@@ -6,7 +6,8 @@ struct OpenTodayIntent: AppIntent {
     static var openAppWhenRun = true
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        .result(dialog: "正在打开 Lamp 的今天。")
+        LampSharedActionQueue.enqueue(LampSharedAction(kind: .openToday))
+        return .result(dialog: "正在打开 Lamp 的今天。")
     }
 }
 
@@ -16,7 +17,8 @@ struct TellLampIntent: AppIntent {
     static var openAppWhenRun = true
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        .result(dialog: "Lamp 已准备好听你说。")
+        LampSharedActionQueue.enqueue(LampSharedAction(kind: .tellLamp))
+        return .result(dialog: "Lamp 已准备好听你说。")
     }
 }
 
@@ -26,4 +28,3 @@ struct LampShortcuts: AppShortcutsProvider {
         AppShortcut(intent: TellLampIntent(), phrases: ["告诉 \(.applicationName)", "用 \(.applicationName) 安排一下"], shortTitle: "告诉 Lamp", systemImageName: "waveform")
     }
 }
-

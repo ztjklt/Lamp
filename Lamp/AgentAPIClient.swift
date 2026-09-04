@@ -26,9 +26,6 @@ enum AgentAPIClient {
     static func interpret(_ input: String) async throws -> AgentDirective {
         #if DEBUG
         let endpoint = URL(string: "http://127.0.0.1:8787/v1/interpret")!
-        #else
-        throw ClientError.productionEndpointNotConfigured
-        #endif
         var request = URLRequest(url: endpoint, timeoutInterval: 22)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -38,9 +35,11 @@ enum AgentAPIClient {
             throw ClientError.invalidResponse
         }
         return try JSONDecoder().decode(AgentDirective.self, from: data)
+        #else
+        throw ClientError.productionEndpointNotConfigured
+        #endif
     }
 
     private struct RequestBody: Encodable { var input: String }
     enum ClientError: Error { case invalidResponse, productionEndpointNotConfigured }
 }
-

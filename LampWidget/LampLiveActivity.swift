@@ -23,12 +23,21 @@ struct LampLiveActivity: Widget {
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button(intent: PartialLampTaskIntent(taskID: context.state.taskID)) {
-                    Image(systemName: "circle.lefthalf.filled")
-                }.buttonStyle(.plain).tint(.orange)
-                Button(intent: CompleteLampTaskIntent(taskID: context.state.taskID)) {
-                    Image(systemName: "checkmark.circle.fill")
-                }.buttonStyle(.plain).tint(.green)
+                if context.state.status == "completed" {
+                    Label("完成", systemImage: "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(.green)
+                } else {
+                    Button(intent: PartialLampTaskIntent(taskID: context.state.taskID)) {
+                        Image(systemName: "circle.lefthalf.filled")
+                    }
+                    .buttonStyle(.plain).tint(.orange)
+                    .accessibilityLabel("部分完成")
+                    Button(intent: CompleteLampTaskIntent(taskID: context.state.taskID)) {
+                        Image(systemName: "checkmark.circle.fill")
+                    }
+                    .buttonStyle(.plain).tint(.green)
+                    .accessibilityLabel("完成任务")
+                }
             }
             .padding(16)
             .activityBackgroundTint(Color(red: 0.97, green: 0.96, blue: 0.93))
@@ -46,13 +55,18 @@ struct LampLiveActivity: Widget {
                         .font(.caption.monospacedDigit()).foregroundStyle(.orange)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    HStack {
-                        Button(intent: PartialLampTaskIntent(taskID: context.state.taskID)) {
-                            Label("部分", systemImage: "circle.lefthalf.filled")
-                        }.tint(.orange)
-                        Button(intent: CompleteLampTaskIntent(taskID: context.state.taskID)) {
-                            Label("完成", systemImage: "checkmark")
-                        }.tint(.green)
+                    if context.state.status == "completed" {
+                        Label("任务已完成", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        HStack {
+                            Button(intent: PartialLampTaskIntent(taskID: context.state.taskID)) {
+                                Label("部分", systemImage: "circle.lefthalf.filled")
+                            }.tint(.orange)
+                            Button(intent: CompleteLampTaskIntent(taskID: context.state.taskID)) {
+                                Label("完成", systemImage: "checkmark")
+                            }.tint(.green)
+                        }
                     }
                 }
             } compactLeading: {
@@ -67,4 +81,3 @@ struct LampLiveActivity: Widget {
         }
     }
 }
-

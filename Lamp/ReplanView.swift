@@ -7,7 +7,7 @@ struct ReplanView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                LampTheme.background.ignoresSafeArea()
+                LampBackground()
                 if let proposal = store.pendingReplan {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 22) {
@@ -34,12 +34,13 @@ struct ReplanView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             HStack(spacing: 12) {
-                                Button("保留原计划") { store.pendingReplan = nil; dismiss() }
-                                    .buttonStyle(.bordered).tint(LampTheme.ink).frame(maxWidth: .infinity)
+                                Button("保留原计划") { store.dismissPendingReplan(); dismiss() }
+                                    .buttonStyle(.lamp).frame(maxWidth: .infinity)
+                                    .accessibilityIdentifier("replan.keep")
                                 Button("应用调整") { store.applyPendingReplan(); dismiss() }
-                                    .buttonStyle(.borderedProminent).tint(LampTheme.ink).frame(maxWidth: .infinity)
+                                    .buttonStyle(.lampProminent).frame(maxWidth: .infinity)
+                                    .accessibilityIdentifier("replan.apply")
                             }
-                            .controlSize(.large)
                         }
                         .padding(22)
                     }
@@ -50,4 +51,3 @@ struct ReplanView: View {
         .interactiveDismissDisabled()
     }
 }
-

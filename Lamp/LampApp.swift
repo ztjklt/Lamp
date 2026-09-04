@@ -8,8 +8,6 @@ struct LampApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(store)
-                .preferredColorScheme(.light)
         }
     }
 }
-

@@ -142,9 +142,27 @@ struct LampSnapshot: Codable, Sendable {
     var temporaryStates: [TemporaryState]
 }
 
+struct OnboardingProfile: Codable, Equatable, Sendable {
+    var context: String
+    var wakeTime: Date
+    var sleepTime: Date
+    var scheduleSource: String
+}
+
+struct PartialCompletionFeedback: Equatable, Sendable {
+    var completedMinutes: Int
+    var remainingMinutes: Int
+    var note: String
+}
+
+struct LampUndoTransaction: Identifiable, Sendable {
+    var id = UUID()
+    var message: String
+    var snapshot: LampSnapshot
+}
+
 extension Calendar {
     func date(on day: Date, hour: Int, minute: Int = 0) -> Date {
         date(bySettingHour: hour, minute: minute, second: 0, of: day) ?? day
     }
 }
-

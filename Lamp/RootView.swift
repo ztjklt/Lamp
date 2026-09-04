@@ -1,8 +1,9 @@
 import SwiftUI
 
-enum LampDestination: String, CaseIterable {
+enum LampDestination: String, CaseIterable, Hashable {
     case today = "今天"
     case week = "本周"
+    case tell = "告诉"
     case roadmap = "路线"
     case profile = "我的"
 
@@ -10,19 +11,54 @@ enum LampDestination: String, CaseIterable {
         switch self {
         case .today: "sparkles"
         case .week: "calendar"
+        case .tell: "waveform"
         case .roadmap: "point.topleft.down.curvedto.point.bottomright.up"
         case .profile: "person.crop.circle"
         }
+    }
+
+    var accessibilityID: String { "tab.\(String(describing: self))" }
+}
+
+enum PresentedFlow: Identifiable, Equatable {
+    case tellLamp
+    case task(UUID)
+    case partial(UUID)
+    case missed(UUID)
+    case privacy
+    case replan
+
+    var id: String {
+        switch self {
+        case .tellLamp: "tell-lamp"
+        case let .task(id): "task-\(id)"
+        case let .partial(id): "partial-\(id)"
+        case let .missed(id): "missed-\(id)"
+        case .privacy: "privacy"
+        case .replan: "replan"
+        }
+    }
+}
+
+@MainActor
+final class AppRouter: ObservableObject {
+    @Published var destination: LampDestination = .today
+    @Published var presentedFlow: PresentedFlow?
+
+    func show(_ flow: PresentedFlow) {
+        presentedFlow = flow
     }
 }
 
 struct RootView: View {
     @EnvironmentObject private var store: LampStore
+    @StateObject private var router = AppRouter()
 
     var body: some View {
         Group {
             if store.hasCompletedOnboarding {
                 AppShell()
+                    .environmentObject(router)
             } else {
                 OnboardingView()
             }
@@ -33,74 +69,150 @@ struct RootView: View {
 
 struct AppShell: View {
     @EnvironmentObject private var store: LampStore
-    @State private var destination: LampDestination = .today
-    @State private var showingTellLamp = false
+    @EnvironmentObject private var router: AppRouter
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            LampTheme.background.ignoresSafeArea()
+        TabView(selection: destinationBinding) {
+            TodayView(showTellLamp: { router.show(.tellLamp) })
+                .tag(LampDestination.today)
+                .tabItem { Label(LampDestination.today.rawValue, systemImage: LampDestination.today.icon) }
+                .accessibilityIdentifier(LampDestination.today.accessibilityID)
 
-            Group {
-                switch destination {
-                case .today: TodayView(showTellLamp: { showingTellLamp = true })
-                case .week: WeekView()
-                case .roadmap: RoadmapView()
-                case .profile: MemoryView()
-                }
-            }
-            .padding(.bottom, 84)
+            WeekView()
+                .tag(LampDestination.week)
+                .tabItem { Label(LampDestination.week.rawValue, systemImage: LampDestination.week.icon) }
+                .accessibilityIdentifier(LampDestination.week.accessibilityID)
 
-            bottomBar
+            Color.clear
+                .tag(LampDestination.tell)
+                .tabItem { Label(LampDestination.tell.rawValue, systemImage: LampDestination.tell.icon) }
+                .accessibilityIdentifier("global.tellLamp")
+
+            RoadmapView()
+                .tag(LampDestination.roadmap)
+                .tabItem { Label(LampDestination.roadmap.rawValue, systemImage: LampDestination.roadmap.icon) }
+                .accessibilityIdentifier(LampDestination.roadmap.accessibilityID)
+
+            MemoryView(showPrivacy: { router.show(.privacy) })
+                .tag(LampDestination.profile)
+                .tabItem { Label(LampDestination.profile.rawValue, systemImage: LampDestination.profile.icon) }
+                .accessibilityIdentifier(LampDestination.profile.accessibilityID)
         }
-        .sheet(isPresented: $showingTellLamp) { TellLampView() }
-        .sheet(item: $store.pendingReplan) { _ in ReplanView() }
+        .tint(LampTheme.amber)
+        .sheet(item: $router.presentedFlow) { flow in
+            presentedView(for: flow)
+        }
         .overlay(alignment: .top) {
             if let toast = store.toast {
-                Text(toast)
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, 18).padding(.vertical, 12)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .shadow(radius: 12)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .task {
-                        try? await Task.sleep(for: .seconds(2.6))
-                        withAnimation { store.toast = nil }
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(LampTheme.sage)
+                    Text(toast)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(2)
+                    if store.undoTransaction != nil {
+                        Button("撤销") { store.undoLastAction() }
+                            .font(.subheadline.weight(.bold))
+                            .accessibilityIdentifier("toast.undo")
                     }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .lampGlass(.regular, cornerRadius: 22)
+                .shadow(color: .black.opacity(0.12), radius: 18, y: 6)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .task(id: toast) {
+                    do {
+                        try await Task.sleep(for: .seconds(6))
+                    } catch {
+                        return
+                    }
+                    guard store.toast == toast else { return }
+                    withAnimation { store.toast = nil }
+                }
+            }
+        }
+        .onAppear { consumeSharedActions() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { consumeSharedActions() }
+        }
+        .onChange(of: store.pendingReplan?.id) { _, id in
+            guard id != nil else { return }
+            if router.presentedFlow == nil {
+                router.show(.replan)
+            }
+        }
+        .onChange(of: router.presentedFlow) { _, flow in
+            guard flow == nil, store.pendingReplan != nil else { return }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(250))
+                if router.presentedFlow == nil, store.pendingReplan != nil {
+                    router.show(.replan)
+                }
             }
         }
     }
 
-    private var bottomBar: some View {
-        HStack(spacing: 2) {
-            ForEach(LampDestination.allCases, id: \.self) { item in
-                Button {
-                    withAnimation(.snappy) { destination = item }
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: item.icon)
-                            .font(.system(size: 17, weight: destination == item ? .semibold : .regular))
-                        Text(item.rawValue).font(.caption2.weight(.medium))
-                    }
-                    .foregroundStyle(destination == item ? LampTheme.ink : .secondary)
-                    .frame(maxWidth: .infinity)
+    private var destinationBinding: Binding<LampDestination> {
+        Binding(
+            get: { router.destination },
+            set: { newValue in
+                if newValue == .tell {
+                    router.show(.tellLamp)
+                } else {
+                    router.destination = newValue
                 }
             }
+        )
+    }
 
-            Button { showingTellLamp = true } label: {
-                ZStack {
-                    Circle().fill(LampTheme.ink).frame(width: 52, height: 52)
-                    Image(systemName: "waveform").font(.title3.weight(.medium)).foregroundStyle(.white)
-                }
-                .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
+    @ViewBuilder
+    private func presentedView(for flow: PresentedFlow) -> some View {
+        switch flow {
+        case .tellLamp:
+            TellLampView()
+        case let .task(id):
+            if let block = store.blocks.first(where: { $0.id == id }) {
+                TaskDetailView(block: block)
             }
-            .accessibilityLabel("告诉 Lamp")
+        case let .partial(id):
+            if let block = store.blocks.first(where: { $0.id == id }) {
+                PartialCompletionView(block: block)
+            }
+        case let .missed(id):
+            if let block = store.blocks.first(where: { $0.id == id }) {
+                MissedTaskView(block: block)
+            }
+        case .privacy:
+            PrivacyDataView()
+        case .replan:
+            ReplanView()
         }
-        .padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 10)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.75)))
-        .padding(.horizontal, 14).padding(.bottom, 6)
+    }
+
+    private func consumeSharedActions() {
+        for action in store.drainSharedActions() {
+            switch action.kind {
+            case .openToday:
+                router.destination = .today
+            case .tellLamp:
+                router.show(.tellLamp)
+            case .completeTask:
+                guard let taskID = action.taskID,
+                      let id = UUID(uuidString: taskID),
+                      let block = store.blocks.first(where: { $0.id == id }),
+                      block.state != .completed else { continue }
+                store.complete(block)
+            case .partialTask:
+                guard let taskID = action.taskID,
+                      let id = UUID(uuidString: taskID),
+                      store.blocks.contains(where: { $0.id == id }) else { continue }
+                router.destination = .today
+                router.show(.partial(id))
+            }
+        }
     }
 }
-

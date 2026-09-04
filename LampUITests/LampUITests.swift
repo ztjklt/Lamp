@@ -1,0 +1,146 @@
+import XCTest
+
+final class LampUITests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        app = XCUIApplication()
+    }
+
+    func testOnboardingCompletesAndPersistsInputs() {
+        launch(showOnboarding: true)
+        XCTAssertTrue(app.descendants(matching: .any)["onboarding.continue"].waitForExistence(timeout: 3))
+        app.descendants(matching: .any)["onboarding.continue"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["onboarding.context"].waitForExistence(timeout: 2))
+        app.descendants(matching: .any)["onboarding.continue"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["onboarding.finish"].waitForExistence(timeout: 2))
+        app.descendants(matching: .any)["onboarding.finish"].tap()
+        XCTAssertTrue(app.tabBars.buttons["今天"].waitForExistence(timeout: 3))
+    }
+
+    func testEveryPrimaryTabAndTellLampRoute() {
+        launch()
+        app.tabBars.buttons["本周"].tap()
+        XCTAssertTrue(app.staticTexts["本周"].waitForExistence(timeout: 2))
+        app.tabBars.buttons["路线"].tap()
+        XCTAssertTrue(app.staticTexts["路线"].waitForExistence(timeout: 2))
+        app.tabBars.buttons["我的"].tap()
+        XCTAssertTrue(app.staticTexts["Lamp 了解的你"].waitForExistence(timeout: 2))
+        app.tabBars.buttons["告诉"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.input"].waitForExistence(timeout: 2))
+        app.buttons["tellLamp.done"].tap()
+        XCTAssertFalse(app.descendants(matching: .any)["tellLamp.input"].exists)
+    }
+
+    func testTodayDetailPartialMissedAndUndoActions() {
+        launch()
+        app.descendants(matching: .any)["today.now.details"].tap()
+        XCTAssertTrue(app.buttons["taskEditor.save"].waitForExistence(timeout: 2))
+        app.buttons["taskEditor.save"].tap()
+
+        app.descendants(matching: .any)["today.now.partial"].tap()
+        XCTAssertTrue(app.buttons["partial.submit"].waitForExistence(timeout: 2))
+        app.buttons["partial.submit"].tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 4))
+        app.buttons["撤销"].tap()
+
+        app.descendants(matching: .any)["today.now.missed"].tap()
+        XCTAssertTrue(app.buttons["missed.submit"].waitForExistence(timeout: 2))
+        app.buttons["missed.submit"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["replan.keep"].waitForExistence(timeout: 3))
+        app.descendants(matching: .any)["replan.keep"].tap()
+
+        app.descendants(matching: .any)["today.now.complete"].tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 4))
+    }
+
+    func testTellLampSuggestionAndSendProducesResult() {
+        launch()
+        app.tabBars.buttons["告诉"].tap()
+        let suggestion = app.descendants(matching: .any)["tellLamp.suggestion.2"]
+        XCTAssertTrue(suggestion.waitForExistence(timeout: 2))
+        suggestion.tap()
+        app.descendants(matching: .any)["tellLamp.send"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.response"].waitForExistence(timeout: 3))
+    }
+
+    func testMemoryEditingAndPrivacyControlsHaveOutcomes() {
+        launch()
+        app.tabBars.buttons["我的"].tap()
+        let menu = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'memory.menu.'")).firstMatch
+        XCTAssertTrue(menu.waitForExistence(timeout: 2))
+        menu.tap()
+        app.buttons["编辑"].tap()
+        XCTAssertTrue(app.buttons["memoryEditor.save"].waitForExistence(timeout: 2))
+        app.buttons["memoryEditor.save"].tap()
+
+        app.descendants(matching: .any)["memory.privacy"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["privacy.export"].waitForExistence(timeout: 2))
+        app.descendants(matching: .any)["privacy.export"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["privacy.shareExport"].waitForExistence(timeout: 2))
+        app.descendants(matching: .any)["privacy.clearCache"].tap()
+        XCTAssertTrue(app.buttons["清除缓存"].waitForExistence(timeout: 2))
+        app.buttons["清除缓存"].tap()
+        app.descendants(matching: .any)["privacy.deleteLocal"].tap()
+        XCTAssertTrue(app.alerts.buttons["取消"].waitForExistence(timeout: 2))
+        app.alerts.buttons["取消"].tap()
+    }
+
+    func testRoadmapExpandsAndEditsGoal() {
+        launch()
+        app.tabBars.buttons["路线"].tap()
+        let goal = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'roadmap.goal.'")).firstMatch
+        XCTAssertTrue(goal.waitForExistence(timeout: 2))
+        goal.tap()
+        let edit = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'roadmap.edit.'")).firstMatch
+        XCTAssertTrue(edit.waitForExistence(timeout: 2))
+        edit.tap()
+        XCTAssertTrue(app.buttons["goalEditor.save"].waitForExistence(timeout: 2))
+        app.buttons["goalEditor.save"].tap()
+    }
+
+    func testWeekSelectionRuleToggleAndMemoryDeleteUndo() {
+        launch()
+        app.tabBars.buttons["本周"].tap()
+        let day = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'week.day.'")).element(boundBy: 1)
+        XCTAssertTrue(day.waitForExistence(timeout: 2))
+        day.tap()
+
+        app.tabBars.buttons["我的"].tap()
+        let rule = app.switches.matching(NSPredicate(format: "identifier BEGINSWITH 'memory.rule.'")).firstMatch
+        XCTAssertTrue(rule.waitForExistence(timeout: 2))
+        let oldValue = rule.value as? String
+        rule.tap()
+        XCTAssertNotEqual(rule.value as? String, oldValue)
+
+        let menu = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'memory.menu.'")).firstMatch
+        menu.tap()
+        app.buttons["删除"].tap()
+        XCTAssertTrue(app.buttons["删除记忆"].waitForExistence(timeout: 2))
+        app.buttons["删除记忆"].tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 3))
+        app.buttons["撤销"].tap()
+    }
+
+    func testReplanApplyAndLocalDataDeletion() {
+        launch()
+        app.descendants(matching: .any)["today.now.missed"].tap()
+        app.buttons["missed.submit"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: 3))
+        app.descendants(matching: .any)["replan.apply"].tap()
+
+        app.tabBars.buttons["我的"].tap()
+        app.descendants(matching: .any)["memory.privacy"].tap()
+        app.descendants(matching: .any)["privacy.deleteLocal"].tap()
+        XCTAssertTrue(app.alerts.buttons["永久删除"].waitForExistence(timeout: 2))
+        app.alerts.buttons["永久删除"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["onboarding.continue"].waitForExistence(timeout: 3))
+    }
+
+    private func launch(showOnboarding: Bool = false) {
+        app.launchArguments = ["-ui-testing"]
+        if showOnboarding { app.launchArguments.append("-show-onboarding") }
+        app.launch()
+    }
+}
