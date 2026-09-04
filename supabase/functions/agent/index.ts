@@ -36,6 +36,11 @@ Deno.serve(async (request) => {
     Deno.env.get("SUPABASE_ANON_KEY")!,
     { global: { headers: { Authorization: authorization } } },
   );
+  const admin = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { auth: { persistSession: false, autoRefreshToken: false } },
+  );
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
 
@@ -82,7 +87,7 @@ Deno.serve(async (request) => {
 
   // Production executors are one function per tool and use database transactions. This skeleton
   // deliberately audits the validated request without exposing generic SQL execution to the model.
-  const { error } = await supabase.from("agent_actions").insert({
+  const { error } = await admin.from("agent_actions").insert({
     user_id: user.id,
     idempotency_key: idempotencyKey,
     tool_name: call.name,
@@ -96,4 +101,3 @@ Deno.serve(async (request) => {
   if (error) return Response.json({ error: "audit_write_failed" }, { status: 500 });
   return Response.json({ status: "accepted", call, risk: validation.risk });
 });
-
