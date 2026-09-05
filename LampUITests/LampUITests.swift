@@ -21,13 +21,18 @@ final class LampUITests: XCTestCase {
 
     func testEveryPrimaryTabAndTellLampRoute() {
         launch()
+        let tellLamp = app.descendants(matching: .any)["global.tellLamp"]
+        XCTAssertTrue(tellLamp.waitForExistence(timeout: 3))
         app.tabBars.buttons["本周"].tap()
         XCTAssertTrue(app.staticTexts["本周"].waitForExistence(timeout: 2))
+        XCTAssertTrue(tellLamp.exists)
         app.tabBars.buttons["路线"].tap()
         XCTAssertTrue(app.staticTexts["路线"].waitForExistence(timeout: 2))
+        XCTAssertTrue(tellLamp.exists)
         app.tabBars.buttons["我的"].tap()
         XCTAssertTrue(app.staticTexts["Lamp 了解的你"].waitForExistence(timeout: 2))
-        app.tabBars.buttons["告诉"].tap()
+        XCTAssertTrue(tellLamp.exists)
+        tellLamp.tap()
         XCTAssertTrue(app.descendants(matching: .any)["tellLamp.input"].waitForExistence(timeout: 2))
         app.buttons["tellLamp.done"].tap()
         XCTAssertFalse(app.descendants(matching: .any)["tellLamp.input"].exists)
@@ -57,12 +62,23 @@ final class LampUITests: XCTestCase {
 
     func testTellLampSuggestionAndSendProducesResult() {
         launch()
-        app.tabBars.buttons["告诉"].tap()
+        app.descendants(matching: .any)["global.tellLamp"].tap()
         let suggestion = app.descendants(matching: .any)["tellLamp.suggestion.2"]
         XCTAssertTrue(suggestion.waitForExistence(timeout: 2))
         suggestion.tap()
         app.descendants(matching: .any)["tellLamp.send"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["tellLamp.response"].waitForExistence(timeout: 3))
+    }
+
+    func testMockVisionCandidateCanBeReviewedAndImported() {
+        launch(extraArguments: ["-mock-image-analysis"])
+        app.descendants(matching: .any)["global.tellLamp"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.imageReview"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.importImage"].isEnabled)
+        app.descendants(matching: .any)["tellLamp.importImage"].tap()
+        XCTAssertTrue(app.tabBars.buttons["今天"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["产品评审"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 3))
     }
 
     func testMemoryEditingAndPrivacyControlsHaveOutcomes() {
@@ -138,9 +154,10 @@ final class LampUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["onboarding.continue"].waitForExistence(timeout: 3))
     }
 
-    private func launch(showOnboarding: Bool = false) {
+    private func launch(showOnboarding: Bool = false, extraArguments: [String] = []) {
         app.launchArguments = ["-ui-testing"]
         if showOnboarding { app.launchArguments.append("-show-onboarding") }
+        app.launchArguments.append(contentsOf: extraArguments)
         app.launch()
     }
 }

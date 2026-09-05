@@ -113,7 +113,7 @@ struct WeekView: View {
         } else {
             ForEach(selectedBlocks) { block in
                 Button {
-                    router.show(.task(block.id))
+                    router.show(.task(block))
                 } label: {
                     HStack(spacing: 14) {
                         RoundedRectangle(cornerRadius: 2).fill(block.kind.color).frame(width: 4, height: 48)

@@ -3,7 +3,6 @@ import SwiftUI
 enum LampDestination: String, CaseIterable, Hashable {
     case today = "今天"
     case week = "本周"
-    case tell = "告诉"
     case roadmap = "路线"
     case profile = "我的"
 
@@ -11,7 +10,6 @@ enum LampDestination: String, CaseIterable, Hashable {
         switch self {
         case .today: "sparkles"
         case .week: "calendar"
-        case .tell: "waveform"
         case .roadmap: "point.topleft.down.curvedto.point.bottomright.up"
         case .profile: "person.crop.circle"
         }
@@ -22,18 +20,18 @@ enum LampDestination: String, CaseIterable, Hashable {
 
 enum PresentedFlow: Identifiable, Equatable {
     case tellLamp
-    case task(UUID)
-    case partial(UUID)
-    case missed(UUID)
+    case task(ScheduleBlock)
+    case partial(ScheduleBlock)
+    case missed(ScheduleBlock)
     case privacy
     case replan
 
     var id: String {
         switch self {
         case .tellLamp: "tell-lamp"
-        case let .task(id): "task-\(id)"
-        case let .partial(id): "partial-\(id)"
-        case let .missed(id): "missed-\(id)"
+        case let .task(block): "task-\(block.id)"
+        case let .partial(block): "partial-\(block.id)"
+        case let .missed(block): "missed-\(block.id)"
         case .privacy: "privacy"
         case .replan: "replan"
         }
@@ -74,7 +72,7 @@ struct AppShell: View {
 
     var body: some View {
         TabView(selection: destinationBinding) {
-            TodayView(showTellLamp: { router.show(.tellLamp) })
+            TodayView()
                 .tag(LampDestination.today)
                 .tabItem { Label(LampDestination.today.rawValue, systemImage: LampDestination.today.icon) }
                 .accessibilityIdentifier(LampDestination.today.accessibilityID)
@@ -83,11 +81,6 @@ struct AppShell: View {
                 .tag(LampDestination.week)
                 .tabItem { Label(LampDestination.week.rawValue, systemImage: LampDestination.week.icon) }
                 .accessibilityIdentifier(LampDestination.week.accessibilityID)
-
-            Color.clear
-                .tag(LampDestination.tell)
-                .tabItem { Label(LampDestination.tell.rawValue, systemImage: LampDestination.tell.icon) }
-                .accessibilityIdentifier("global.tellLamp")
 
             RoadmapView()
                 .tag(LampDestination.roadmap)
@@ -100,6 +93,12 @@ struct AppShell: View {
                 .accessibilityIdentifier(LampDestination.profile.accessibilityID)
         }
         .tint(LampTheme.amber)
+        .overlay(alignment: .bottom) {
+            GlobalTellLampButton {
+                router.show(.tellLamp)
+            }
+            .padding(.bottom, 58)
+        }
         .sheet(item: $router.presentedFlow) { flow in
             presentedView(for: flow)
         }
@@ -156,36 +155,19 @@ struct AppShell: View {
         }
     }
 
-    private var destinationBinding: Binding<LampDestination> {
-        Binding(
-            get: { router.destination },
-            set: { newValue in
-                if newValue == .tell {
-                    router.show(.tellLamp)
-                } else {
-                    router.destination = newValue
-                }
-            }
-        )
-    }
+    private var destinationBinding: Binding<LampDestination> { $router.destination }
 
     @ViewBuilder
     private func presentedView(for flow: PresentedFlow) -> some View {
         switch flow {
         case .tellLamp:
             TellLampView()
-        case let .task(id):
-            if let block = store.blocks.first(where: { $0.id == id }) {
-                TaskDetailView(block: block)
-            }
-        case let .partial(id):
-            if let block = store.blocks.first(where: { $0.id == id }) {
-                PartialCompletionView(block: block)
-            }
-        case let .missed(id):
-            if let block = store.blocks.first(where: { $0.id == id }) {
-                MissedTaskView(block: block)
-            }
+        case let .task(block):
+            TaskDetailView(block: block)
+        case let .partial(block):
+            PartialCompletionView(block: block)
+        case let .missed(block):
+            MissedTaskView(block: block)
         case .privacy:
             PrivacyDataView()
         case .replan:
@@ -209,10 +191,65 @@ struct AppShell: View {
             case .partialTask:
                 guard let taskID = action.taskID,
                       let id = UUID(uuidString: taskID),
-                      store.blocks.contains(where: { $0.id == id }) else { continue }
+                      let block = store.blocks.first(where: { $0.id == id }) else { continue }
                 router.destination = .today
-                router.show(.partial(id))
+                router.show(.partial(block))
             }
         }
+    }
+}
+
+private struct GlobalTellLampButton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var glowing = false
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 18, weight: .bold))
+                    .symbolEffect(.variableColor.iterative, isActive: !reduceMotion && glowing)
+                Text("和 Lamp 对话")
+                    .font(.headline.weight(.bold))
+            }
+            .foregroundStyle(.white)
+            .frame(minWidth: 174, minHeight: 58)
+            .padding(.horizontal, 18)
+            .background(
+                LinearGradient(
+                    colors: [
+                        LampTheme.amberSoft.opacity(0.88),
+                        LampTheme.amber.opacity(0.90),
+                        Color(red: 0.91, green: 0.36, blue: 0.08).opacity(0.92)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: Capsule()
+            )
+            .overlay(Capsule().stroke(.white.opacity(0.48), lineWidth: 1))
+            .lampGlass(.prominent, cornerRadius: 30)
+            .shadow(color: LampTheme.amber.opacity(glowing ? 0.46 : 0.25), radius: glowing ? 24 : 14, y: 8)
+            .scaleEffect(!reduceMotion && glowing ? 1.018 : 1)
+        }
+        .buttonStyle(GlobalLampPressStyle())
+        .accessibilityIdentifier("global.tellLamp")
+        .accessibilityHint("打开文字、语音和图片日程输入")
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
+                glowing = true
+            }
+        }
+    }
+}
+
+private struct GlobalLampPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.88 : 1)
+            .animation(.snappy(duration: 0.18), value: configuration.isPressed)
     }
 }

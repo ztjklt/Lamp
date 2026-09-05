@@ -8,6 +8,9 @@ final class LampStore: ObservableObject {
     @Published var memories: [MemoryFact] = []
     @Published var rules: [PlanningRule] = []
     @Published var temporaryStates: [TemporaryState] = []
+    @Published var recurringSchedules: [RecurringScheduleRule] = []
+    @Published var occurrenceOverrides: [ScheduleOccurrenceOverride] = []
+    @Published var highlightedBlockIDs: Set<UUID> = []
     @Published var pendingReplan: ReplanProposal?
     @Published var toast: String?
     @Published var undoTransaction: LampUndoTransaction?
@@ -51,14 +54,44 @@ final class LampStore: ObservableObject {
 
     var weeklyFocusMinutes: Int {
         let interval = calendar.dateInterval(of: .weekOfYear, for: .now)
-        return blocks.filter {
-            guard let interval else { return false }
-            return interval.contains($0.start) && $0.kind == .focus && $0.state != .missed
-        }.reduce(0) { $0 + $1.durationMinutes }
+        guard let interval else { return 0 }
+        return (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: interval.start) }
+            .flatMap { blocks(on: $0) }
+            .filter { $0.kind == .focus && $0.state != .missed }
+            .reduce(0) { $0 + $1.durationMinutes }
     }
 
     func blocks(on date: Date) -> [ScheduleBlock] {
-        blocks.filter { calendar.isDate($0.start, inSameDayAs: date) }.sorted { $0.start < $1.start }
+        let oneOff = blocks.filter { calendar.isDate($0.start, inSameDayAs: date) }
+        var recurring = recurringSchedules.compactMap { rule -> ScheduleBlock? in
+            let occurrenceOverride = occurrenceOverrides.first {
+                $0.recurringRuleID == rule.id && calendar.isDate($0.occurrenceDate, inSameDayAs: date)
+            }
+            let occurrence = RecurringScheduleEngine.occurrence(
+                for: rule,
+                on: date,
+                override: occurrenceOverride,
+                calendar: calendar
+            )
+            guard let occurrence, calendar.isDate(occurrence.start, inSameDayAs: date) else { return nil }
+            return occurrence
+        }
+        let movedHere = occurrenceOverrides.compactMap { occurrenceOverride -> ScheduleBlock? in
+            guard let movedStart = occurrenceOverride.start,
+                  calendar.isDate(movedStart, inSameDayAs: date),
+                  !calendar.isDate(occurrenceOverride.occurrenceDate, inSameDayAs: date),
+                  let rule = recurringSchedules.first(where: { $0.id == occurrenceOverride.recurringRuleID }) else {
+                return nil
+            }
+            return RecurringScheduleEngine.occurrence(
+                for: rule,
+                on: occurrenceOverride.occurrenceDate,
+                override: occurrenceOverride,
+                calendar: calendar
+            )
+        }
+        recurring.append(contentsOf: movedHere)
+        return (oneOff + recurring).sorted { $0.start < $1.start }
     }
 
     func focusMinutes(on date: Date) -> Int {
@@ -107,10 +140,12 @@ final class LampStore: ObservableObject {
 
     func submitPartial(_ block: ScheduleBlock, feedback: PartialCompletionFeedback) {
         beginTransaction("已撤销部分完成")
-        guard let index = blocks.firstIndex(where: { $0.id == block.id }) else { return }
-        blocks[index].state = .partial
-        blocks[index].reason = feedback.note.isEmpty ? "已完成一部分" : feedback.note
-        updatePlanProgress(for: block, completedMinutes: feedback.completedMinutes)
+        setBlock(
+            block,
+            state: .partial,
+            completedMinutes: feedback.completedMinutes,
+            reason: feedback.note.isEmpty ? "已完成一部分" : feedback.note
+        )
 
         if feedback.remainingMinutes > 0 {
             let tomorrow = calendar.date(byAdding: .day, value: 1, to: block.start) ?? block.start
@@ -132,9 +167,12 @@ final class LampStore: ObservableObject {
 
     func proposeMissed(_ block: ScheduleBlock, reason: String) {
         beginTransaction("已撤销未做记录")
-        guard let index = blocks.firstIndex(where: { $0.id == block.id }) else { return }
-        blocks[index].state = .missed
-        blocks[index].reason = reason.isEmpty ? "本次未完成" : reason
+        setBlock(
+            block,
+            state: .missed,
+            completedMinutes: 0,
+            reason: reason.isEmpty ? "本次未完成" : reason
+        )
 
         var proposed = blocks
         if block.kind == .focus {
@@ -180,7 +218,7 @@ final class LampStore: ObservableObject {
     }
 
     func updateBlock(_ block: ScheduleBlock, title: String, start: Date, end: Date) -> Bool {
-        guard block.kind != .fixed else {
+        guard block.kind != .fixed || block.recurringRuleID != nil else {
             toast = "固定日程请在来源日历中修改"
             return false
         }
@@ -188,7 +226,7 @@ final class LampStore: ObservableObject {
             toast = "结束时间需要晚于开始时间"
             return false
         }
-        let conflicts = blocks.contains {
+        let conflicts = blocks(on: start).contains {
             $0.id != block.id && $0.kind == .fixed && start < $0.end && end > $0.start
         }
         guard !conflicts else {
@@ -196,11 +234,31 @@ final class LampStore: ObservableObject {
             return false
         }
         beginTransaction("已撤销日程修改")
-        guard let index = blocks.firstIndex(where: { $0.id == block.id }) else { return false }
-        blocks[index].title = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? block.title : title
-        blocks[index].start = start
-        blocks[index].end = end
-        blocks[index].provenance = "手动调整"
+        let updatedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? block.title : title
+        if let ruleID = block.recurringRuleID, let occurrenceDate = block.occurrenceDate {
+            if let index = occurrenceOverrides.firstIndex(where: {
+                $0.recurringRuleID == ruleID && calendar.isDate($0.occurrenceDate, inSameDayAs: occurrenceDate)
+            }) {
+                occurrenceOverrides[index].title = updatedTitle
+                occurrenceOverrides[index].start = start
+                occurrenceOverrides[index].end = end
+            } else {
+                occurrenceOverrides.append(ScheduleOccurrenceOverride(
+                    recurringRuleID: ruleID,
+                    occurrenceDate: occurrenceDate,
+                    state: block.state,
+                    title: updatedTitle,
+                    start: start,
+                    end: end
+                ))
+            }
+        } else {
+            guard let index = blocks.firstIndex(where: { $0.id == block.id }) else { return false }
+            blocks[index].title = updatedTitle
+            blocks[index].start = start
+            blocks[index].end = end
+            blocks[index].provenance = "手动调整"
+        }
         toast = "日程已更新"
         save()
         return true
@@ -246,22 +304,72 @@ final class LampStore: ObservableObject {
         toggleRule(id: rule.id, isEnabled: !rule.isEnabled)
     }
 
-    func importOCRLines(_ lines: [String]) {
-        guard !lines.isEmpty else { return }
-        beginTransaction("已撤销图片导入")
-        for line in lines.prefix(12) {
-            let title = String(line.prefix(40))
-            let item = PlanItem(kind: .task, title: title, detail: "从图片识别并由用户确认", estimatedMinutes: 60)
-            planItems.append(item)
-            addToNextAvailableSlot(item)
+    @discardableResult
+    func importScheduleCandidates(_ candidates: [ImageScheduleCandidate]) -> [UUID] {
+        let valid = candidates.filter { candidate in
+            guard !candidate.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let start = candidate.startAt,
+                  let end = candidate.endAt,
+                  end > start else { return false }
+            return conflictDescription(for: candidate) == nil
         }
-        toast = "已导入 \(min(lines.count, 12)) 条候选事项"
+        guard !valid.isEmpty else { return [] }
+
+        beginTransaction("已撤销图片导入")
+        var insertedIDs: [UUID] = []
+        for candidate in valid.prefix(24) {
+            guard let start = candidate.startAt, let end = candidate.endAt else { continue }
+            if candidate.recurrence.kind == .weekly {
+                var candidateCalendar = calendar
+                candidateCalendar.timeZone = TimeZone(identifier: candidate.timezone) ?? calendar.timeZone
+                let rule = RecurringScheduleRule(
+                    title: candidate.title,
+                    detail: candidate.detail,
+                    startsOn: candidate.recurrence.startsOn ?? start,
+                    endsOn: candidate.recurrence.endsOn,
+                    weekdays: candidate.recurrence.weekdays.isEmpty
+                        ? [candidateCalendar.component(.weekday, from: start)]
+                        : candidate.recurrence.weekdays,
+                    startMinute: candidateCalendar.component(.hour, from: start) * 60 + candidateCalendar.component(.minute, from: start),
+                    durationMinutes: max(1, Int(end.timeIntervalSince(start) / 60)),
+                    timezone: candidate.timezone
+                )
+                recurringSchedules.append(rule)
+                let firstDay = nextOccurrenceDate(for: rule, onOrAfter: .now) ?? rule.startsOn
+                insertedIDs.append(RecurringScheduleEngine.occurrenceID(ruleID: rule.id, day: firstDay, calendar: calendar))
+            } else {
+                let block = ScheduleBlock(
+                    title: candidate.title,
+                    start: start,
+                    end: end,
+                    kind: .fixed,
+                    reason: candidate.detail,
+                    provenance: "DeepSeek 图片识别 · 用户确认"
+                )
+                blocks.append(block)
+                insertedIDs.append(block.id)
+            }
+        }
+        highlightedBlockIDs = Set(insertedIDs)
+        toast = "已将 \(insertedIDs.count) 项日程加入时间线"
         save()
+        return insertedIDs
+    }
+
+    func conflictDescription(for candidate: ImageScheduleCandidate) -> String? {
+        ScheduleCandidateValidator.issue(
+            for: candidate,
+            blocks: blocks,
+            recurringSchedules: recurringSchedules,
+            occurrenceOverrides: occurrenceOverrides,
+            calendar: calendar
+        )
     }
 
     func undoLastAction() {
         guard let transaction = undoTransaction else { return }
         apply(transaction.snapshot)
+        highlightedBlockIDs = []
         undoTransaction = nil
         toast = transaction.message
         save()
@@ -401,6 +509,9 @@ final class LampStore: ObservableObject {
         memories = []
         rules = []
         temporaryStates = []
+        recurringSchedules = []
+        occurrenceOverrides = []
+        highlightedBlockIDs = []
         pendingReplan = nil
         undoTransaction = nil
         onboardingProfile = nil
@@ -414,9 +525,30 @@ final class LampStore: ObservableObject {
         LampSharedActionQueue.drain()
     }
 
-    private func setBlock(_ block: ScheduleBlock, state: CompletionState, completedMinutes: Int) {
-        guard let index = blocks.firstIndex(where: { $0.id == block.id }) else { return }
-        blocks[index].state = state
+    private func setBlock(
+        _ block: ScheduleBlock,
+        state: CompletionState,
+        completedMinutes: Int,
+        reason: String? = nil
+    ) {
+        if let ruleID = block.recurringRuleID, let occurrenceDate = block.occurrenceDate {
+            if let index = occurrenceOverrides.firstIndex(where: {
+                $0.recurringRuleID == ruleID && calendar.isDate($0.occurrenceDate, inSameDayAs: occurrenceDate)
+            }) {
+                occurrenceOverrides[index].state = state
+                if let reason { occurrenceOverrides[index].reason = reason }
+            } else {
+                occurrenceOverrides.append(ScheduleOccurrenceOverride(
+                    recurringRuleID: ruleID,
+                    occurrenceDate: occurrenceDate,
+                    state: state,
+                    reason: reason ?? ""
+                ))
+            }
+        } else if let index = blocks.firstIndex(where: { $0.id == block.id }) {
+            blocks[index].state = state
+            if let reason { blocks[index].reason = reason }
+        }
         updatePlanProgress(for: block, completedMinutes: completedMinutes)
     }
 
@@ -468,6 +600,8 @@ final class LampStore: ObservableObject {
         memories = snapshot.memories
         rules = snapshot.rules
         temporaryStates = snapshot.temporaryStates
+        recurringSchedules = snapshot.recurringSchedules
+        occurrenceOverrides = snapshot.occurrenceOverrides
     }
 
     private func makeSnapshot() -> LampSnapshot {
@@ -476,7 +610,9 @@ final class LampStore: ObservableObject {
             blocks: blocks,
             memories: memories,
             rules: rules,
-            temporaryStates: temporaryStates
+            temporaryStates: temporaryStates,
+            recurringSchedules: recurringSchedules,
+            occurrenceOverrides: occurrenceOverrides
         )
     }
 
@@ -502,5 +638,15 @@ final class LampStore: ObservableObject {
             )
             UNUserNotificationCenter.current().add(request)
         }
+    }
+
+    private func nextOccurrenceDate(for rule: RecurringScheduleRule, onOrAfter date: Date) -> Date? {
+        let start = max(calendar.startOfDay(for: date), calendar.startOfDay(for: rule.startsOn))
+        for offset in 0..<14 {
+            guard let day = calendar.date(byAdding: .day, value: offset, to: start) else { continue }
+            if let endsOn = rule.endsOn, day > calendar.startOfDay(for: endsOn) { return nil }
+            if rule.weekdays.contains(calendar.component(.weekday, from: day)) { return day }
+        }
+        return nil
     }
 }

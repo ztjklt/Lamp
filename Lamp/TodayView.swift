@@ -3,7 +3,6 @@ import SwiftUI
 struct TodayView: View {
     @EnvironmentObject private var store: LampStore
     @EnvironmentObject private var router: AppRouter
-    var showTellLamp: () -> Void
 
     private var dayTitle: String {
         Date.now.formatted(.dateTime.month(.wide).day().weekday(.wide).locale(Locale(identifier: "zh_CN")))
@@ -38,12 +37,10 @@ struct TodayView: View {
                 Text(dayTitle).font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer()
-            Button(action: showTellLamp) {
-                LampLight(size: 42)
-                    .frame(width: 58, height: 58)
-            }
-            .accessibilityLabel("告诉 Lamp")
-            .accessibilityIdentifier("today.lampButton")
+            LampLight(size: 38)
+                .frame(width: 54, height: 54)
+                .accessibilityLabel("Lamp 已准备好")
+                .accessibilityIdentifier("today.lampStatus")
         }
     }
 
@@ -64,7 +61,7 @@ struct TodayView: View {
                             }
                             Spacer()
                             Button {
-                                router.show(.task(block.id))
+                                router.show(.task(block))
                             } label: {
                                 Image(systemName: "arrow.up.right")
                                     .frame(width: 44, height: 44)
@@ -82,10 +79,10 @@ struct TodayView: View {
                                 store.complete(block)
                             }
                             taskButton("部分", "circle.lefthalf.filled", id: "today.now.partial") {
-                                router.show(.partial(block.id))
+                                router.show(.partial(block))
                             }
                             taskButton("未做", "xmark", id: "today.now.missed") {
-                                router.show(.missed(block.id))
+                                router.show(.missed(block))
                             }
                         }
                         if !block.reason.isEmpty {
@@ -145,7 +142,7 @@ struct TodayView: View {
                         }
                     }
                     Button {
-                        router.show(.task(block.id))
+                        router.show(.task(block))
                     } label: {
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 5) {
@@ -163,6 +160,13 @@ struct TodayView: View {
                         .padding(14)
                         .frame(minHeight: 64)
                         .background(LampTheme.secondaryBackground.opacity(0.82), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(
+                                    store.highlightedBlockIDs.contains(block.id) ? LampTheme.amber : LampTheme.hairline,
+                                    lineWidth: store.highlightedBlockIDs.contains(block.id) ? 2 : 0.8
+                                )
+                        }
                     }
                     .buttonStyle(.plain)
                     .opacity(block.state == .missed ? 0.58 : 1)
@@ -221,6 +225,10 @@ struct TaskDetailView: View {
     @State private var start: Date
     @State private var end: Date
 
+    private var canEdit: Bool {
+        block.kind != .fixed || block.recurringRuleID != nil
+    }
+
     init(block: ScheduleBlock) {
         self.block = block
         _title = State(initialValue: block.title)
@@ -232,7 +240,7 @@ struct TaskDetailView: View {
         NavigationStack {
             Form {
                 Section("任务") {
-                    if block.kind == .fixed {
+                    if !canEdit {
                         LabeledContent("名称", value: block.title)
                     } else {
                         TextField("名称", text: $title)
@@ -243,16 +251,21 @@ struct TaskDetailView: View {
                 }
                 Section("时间") {
                     DatePicker("开始", selection: $start)
-                        .disabled(block.kind == .fixed)
+                        .disabled(!canEdit)
                     DatePicker("结束", selection: $end)
-                        .disabled(block.kind == .fixed)
+                        .disabled(!canEdit)
                 }
                 if !block.reason.isEmpty {
                     Section("为什么这样安排") { Text(block.reason) }
                 }
-                if block.kind == .fixed {
+                if !canEdit {
                     Section {
                         Label("固定日程需要在“\(block.provenance)”中修改，Lamp 会在下次同步后更新。", systemImage: "lock.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if block.recurringRuleID != nil {
+                    Section {
+                        Label("保存只会修改这一次，其他重复日程保持不变。", systemImage: "repeat.1")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -263,7 +276,7 @@ struct TaskDetailView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
                 }
-                if block.kind != .fixed {
+                if canEdit {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("保存") {
                             if store.updateBlock(block, title: title, start: start, end: end) { dismiss() }

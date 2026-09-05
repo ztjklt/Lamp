@@ -102,5 +102,138 @@ struct PlanningEngineTests {
         let blocks = PlanningEngine(calendar: calendar).makeSchedule(items: [task], fixed: [], previous: [old], context: context())
         #expect(blocks.first?.start == old.start)
     }
-}
 
+    @Test("weekly recurrence expands with a stable occurrence ID")
+    func weeklyRecurrenceExpansion() {
+        let weekday = calendar.component(.weekday, from: day)
+        let rule = RecurringScheduleRule(
+            title: "每周研讨课",
+            detail: "教室 A",
+            startsOn: day,
+            weekdays: [weekday],
+            startMinute: 9 * 60 + 30,
+            durationMinutes: 90,
+            timezone: "UTC"
+        )
+        let first = RecurringScheduleEngine.occurrence(for: rule, on: day, calendar: calendar)
+        let repeated = RecurringScheduleEngine.occurrence(for: rule, on: day, calendar: calendar)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: day)!
+
+        #expect(first?.id == repeated?.id)
+        #expect(first?.start == calendar.date(on: day, hour: 9, minute: 30))
+        #expect(first?.durationMinutes == 90)
+        #expect(RecurringScheduleEngine.occurrence(for: rule, on: tomorrow, calendar: calendar) == nil)
+    }
+
+    @Test("an occurrence override changes only one weekly instance")
+    func weeklyOccurrenceOverride() {
+        let weekday = calendar.component(.weekday, from: day)
+        let rule = RecurringScheduleRule(
+            title: "原课程",
+            detail: "",
+            startsOn: day,
+            weekdays: [weekday],
+            startMinute: 10 * 60,
+            durationMinutes: 60,
+            timezone: "UTC"
+        )
+        let movedStart = calendar.date(on: day, hour: 14)
+        let movedEnd = calendar.date(on: day, hour: 15)
+        let override = ScheduleOccurrenceOverride(
+            recurringRuleID: rule.id,
+            occurrenceDate: day,
+            state: .partial,
+            title: "本周改期",
+            start: movedStart,
+            end: movedEnd
+        )
+        let occurrence = RecurringScheduleEngine.occurrence(for: rule, on: day, override: override, calendar: calendar)
+        let nextWeek = calendar.date(byAdding: .day, value: 7, to: day)!
+        let nextOccurrence = RecurringScheduleEngine.occurrence(for: rule, on: nextWeek, calendar: calendar)
+
+        #expect(occurrence?.title == "本周改期")
+        #expect(occurrence?.state == .partial)
+        #expect(occurrence?.start == movedStart)
+        #expect(nextOccurrence?.title == "原课程")
+        #expect(nextOccurrence?.state == .planned)
+    }
+
+    @Test("cancelled recurrence override hides only that instance")
+    func cancelledOccurrence() {
+        let weekday = calendar.component(.weekday, from: day)
+        let rule = RecurringScheduleRule(
+            title: "训练",
+            detail: "",
+            startsOn: day,
+            weekdays: [weekday],
+            startMinute: 18 * 60,
+            durationMinutes: 60,
+            timezone: "UTC"
+        )
+        let override = ScheduleOccurrenceOverride(
+            recurringRuleID: rule.id,
+            occurrenceDate: day,
+            state: .missed,
+            isCancelled: true
+        )
+        #expect(RecurringScheduleEngine.occurrence(for: rule, on: day, override: override, calendar: calendar) == nil)
+        #expect(RecurringScheduleEngine.occurrence(
+            for: rule,
+            on: calendar.date(byAdding: .day, value: 7, to: day)!,
+            calendar: calendar
+        ) != nil)
+    }
+
+    @Test("candidate validator detects duplicates and fixed conflicts")
+    func candidateConflictAndDuplicateDetection() {
+        let fixed = ScheduleBlock(
+            title: "项目会",
+            start: calendar.date(on: day, hour: 10),
+            end: calendar.date(on: day, hour: 11),
+            kind: .fixed
+        )
+        let duplicate = ImageScheduleCandidate(
+            title: fixed.title,
+            startAt: fixed.start,
+            endAt: fixed.end,
+            timezone: "UTC",
+            confidence: 0.95
+        )
+        let overlap = ImageScheduleCandidate(
+            title: "客户电话",
+            startAt: calendar.date(on: day, hour: 10, minute: 30),
+            endAt: calendar.date(on: day, hour: 11, minute: 30),
+            timezone: "UTC",
+            confidence: 0.9
+        )
+        #expect(ScheduleCandidateValidator.issue(for: duplicate, blocks: [fixed], recurringSchedules: [], calendar: calendar)?.contains("相同") == true)
+        #expect(ScheduleCandidateValidator.issue(for: overlap, blocks: [fixed], recurringSchedules: [], calendar: calendar)?.contains("冲突") == true)
+    }
+
+    @Test("legacy snapshots decode with empty recurrence arrays")
+    func legacySnapshotCompatibility() throws {
+        let original = DemoData.snapshot(now: day, calendar: calendar)
+        let encoded = try JSONEncoder().encode(original)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "recurringSchedules")
+        object.removeValue(forKey: "occurrenceOverrides")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(LampSnapshot.self, from: legacyData)
+
+        #expect(decoded.blocks.count == original.blocks.count)
+        #expect(decoded.recurringSchedules.isEmpty)
+        #expect(decoded.occurrenceOverrides.isEmpty)
+    }
+
+    @Test("vision response decodes ISO dates and weekly rules")
+    func visionResponseDecoding() throws {
+        let json = #"{"analysisID":"8A62C0F3-5D30-46A6-9B9C-C7CA21F70A92","summary":"识别到课程","candidates":[{"id":"0B7D8D22-3FC7-438E-8C22-D4A58FF639B0","title":"设计课","detail":"教室 2","startAt":"2026-09-07T09:00:00Z","endAt":"2026-09-07T10:30:00Z","timezone":"UTC","confidence":0.91,"sourceEvidence":"周一 9:00","needsReview":false,"recurrence":{"kind":"weekly","weekdays":[2],"startsOn":"2026-09-07T00:00:00Z","endsOn":null}}],"warnings":[]}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(ImageScheduleAnalysisResponse.self, from: Data(json.utf8))
+
+        #expect(response.candidates.first?.recurrence.kind == .weekly)
+        #expect(response.candidates.first?.recurrence.weekdays == [2])
+        #expect(response.candidates.first?.startAt != nil)
+    }
+}
