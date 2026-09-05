@@ -224,9 +224,11 @@ struct TaskDetailView: View {
     @State private var title: String
     @State private var start: Date
     @State private var end: Date
+    @State private var showingDeleteConfirmation = false
+    @State private var showingRecurringDeleteOptions = false
 
     private var canEdit: Bool {
-        block.kind != .fixed || block.recurringRuleID != nil
+        block.kind != .fixed
     }
 
     init(block: ScheduleBlock) {
@@ -246,7 +248,7 @@ struct TaskDetailView: View {
                         TextField("名称", text: $title)
                             .accessibilityIdentifier("taskEditor.title")
                     }
-                    LabeledContent("类型", value: block.kind == .fixed ? "固定日程" : "灵活任务")
+                    LabeledContent("类型", value: blockTypeLabel)
                     LabeledContent("来源", value: block.provenance)
                 }
                 Section("时间") {
@@ -260,7 +262,7 @@ struct TaskDetailView: View {
                 }
                 if !canEdit {
                     Section {
-                        Label("固定日程需要在“\(block.provenance)”中修改，Lamp 会在下次同步后更新。", systemImage: "lock.fill")
+                        Label("固定日程不能在 Lamp 中改写，但可以从 Lamp 删除；外部来源不会受影响。", systemImage: "lock.fill")
                             .foregroundStyle(.secondary)
                     }
                 } else if block.recurringRuleID != nil {
@@ -268,6 +270,23 @@ struct TaskDetailView: View {
                         Label("保存只会修改这一次，其他重复日程保持不变。", systemImage: "repeat.1")
                             .foregroundStyle(.secondary)
                     }
+                }
+                Section {
+                    Button(role: .destructive) {
+                        if block.recurringRuleID == nil {
+                            showingDeleteConfirmation = true
+                        } else {
+                            showingRecurringDeleteOptions = true
+                        }
+                    } label: {
+                        Label("删除日程", systemImage: "trash")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .accessibilityIdentifier("taskEditor.delete")
+                } footer: {
+                    Text(block.kind == .fixed
+                         ? "只会从 Lamp 删除，不会修改“\(block.provenance)”中的原日程。"
+                         : "删除后可以通过顶部提示立即撤销。")
                 }
             }
             .navigationTitle("任务详情")
@@ -288,6 +307,35 @@ struct TaskDetailView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .alert("从 Lamp 删除这条日程？", isPresented: $showingDeleteConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("删除日程", role: .destructive) { deleteBlock(scope: .singleOccurrence) }
+                .accessibilityIdentifier("taskEditor.confirmDelete")
+        } message: {
+            Text("将删除“\(block.title)”。\(block.kind == .fixed ? "“\(block.provenance)”中的原日程不会改变。" : "关联任务本身会继续保留。")")
+        }
+        .confirmationDialog("删除重复日程", isPresented: $showingRecurringDeleteOptions, titleVisibility: .visible) {
+            Button("仅删除本次", role: .destructive) { deleteBlock(scope: .singleOccurrence) }
+                .accessibilityIdentifier("taskEditor.deleteSingle")
+            Button("删除整个重复日程", role: .destructive) { deleteBlock(scope: .entireSeries) }
+                .accessibilityIdentifier("taskEditor.deleteSeries")
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("“\(block.title)”是重复日程。请选择只删除这一次，或删除整个系列。")
+        }
+    }
+
+    private var blockTypeLabel: String {
+        switch block.kind {
+        case .fixed: "固定日程"
+        case .focus: "灵活任务"
+        case .breakTime: "休息"
+        case .free: "空闲"
+        }
+    }
+
+    private func deleteBlock(scope: ScheduleDeletionScope) {
+        if store.deleteScheduleBlock(block, scope: scope) { dismiss() }
     }
 }
 

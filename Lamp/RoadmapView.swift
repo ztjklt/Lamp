@@ -141,6 +141,7 @@ struct GoalEditorView: View {
     let goal: PlanItem
     @State private var title: String
     @State private var detail: String
+    @State private var showingDeleteConfirmation = false
 
     init(goal: PlanItem) {
         self.goal = goal
@@ -162,6 +163,17 @@ struct GoalEditorView: View {
                     Text("修改目标不会静默重写日程；需要大范围调整时 Lamp 会先展示预览。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section {
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Label("删除年度目标", systemImage: "trash")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .accessibilityIdentifier("goalEditor.delete")
+                } footer: {
+                    Text("关联计划会保留并转为未关联，直接关联的时间块会删除。")
+                }
             }
             .navigationTitle("编辑目标")
             .navigationBarTitleDisplayMode(.inline)
@@ -177,6 +189,15 @@ struct GoalEditorView: View {
                     .accessibilityIdentifier("goalEditor.save")
                 }
             }
+        }
+        .alert("删除年度目标？", isPresented: $showingDeleteConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("删除目标", role: .destructive) {
+                if store.deletePlanItem(goal) { dismiss() }
+            }
+            .accessibilityIdentifier("goalEditor.confirmDelete")
+        } message: {
+            Text("将删除“\(goal.title)”。关联计划会保留并转为未关联；删除后可以撤销。")
         }
     }
 }

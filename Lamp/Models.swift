@@ -23,6 +23,11 @@ enum CompletionState: String, Codable, Sendable {
     case planned, active, completed, partial, missed
 }
 
+enum ScheduleDeletionScope: String, Codable, CaseIterable, Sendable {
+    case singleOccurrence
+    case entireSeries
+}
+
 enum MemoryStatus: String, Codable, Sendable {
     case inferred, proposed, confirmed
 }
@@ -205,6 +210,62 @@ enum RecurringScheduleEngine {
     }
 }
 
+enum ScheduleDeletionEngine {
+    @discardableResult
+    static func delete(
+        block: ScheduleBlock,
+        scope: ScheduleDeletionScope,
+        blocks: inout [ScheduleBlock],
+        recurringSchedules: inout [RecurringScheduleRule],
+        occurrenceOverrides: inout [ScheduleOccurrenceOverride],
+        calendar: Calendar = .current
+    ) -> Bool {
+        if let ruleID = block.recurringRuleID {
+            guard recurringSchedules.contains(where: { $0.id == ruleID }) else { return false }
+            if scope == .entireSeries {
+                recurringSchedules.removeAll { $0.id == ruleID }
+                occurrenceOverrides.removeAll { $0.recurringRuleID == ruleID }
+                return true
+            }
+            guard let occurrenceDate = block.occurrenceDate else { return false }
+            if let index = occurrenceOverrides.firstIndex(where: {
+                $0.recurringRuleID == ruleID && calendar.isDate($0.occurrenceDate, inSameDayAs: occurrenceDate)
+            }) {
+                occurrenceOverrides[index].state = .missed
+                occurrenceOverrides[index].reason = "由你从 Lamp 删除"
+                occurrenceOverrides[index].isCancelled = true
+            } else {
+                occurrenceOverrides.append(ScheduleOccurrenceOverride(
+                    recurringRuleID: ruleID,
+                    occurrenceDate: occurrenceDate,
+                    state: .missed,
+                    reason: "由你从 Lamp 删除",
+                    isCancelled: true
+                ))
+            }
+            return true
+        }
+        guard blocks.contains(where: { $0.id == block.id }) else { return false }
+        blocks.removeAll { $0.id == block.id }
+        return true
+    }
+
+    @discardableResult
+    static func delete(
+        item: PlanItem,
+        planItems: inout [PlanItem],
+        blocks: inout [ScheduleBlock]
+    ) -> Bool {
+        guard planItems.contains(where: { $0.id == item.id }) else { return false }
+        planItems.removeAll { $0.id == item.id }
+        for index in planItems.indices where planItems[index].parentID == item.id {
+            planItems[index].parentID = nil
+        }
+        blocks.removeAll { $0.planItemID == item.id }
+        return true
+    }
+}
+
 enum ImageScheduleRecurrenceKind: String, Codable, CaseIterable, Sendable {
     case none
     case weekly
@@ -228,6 +289,8 @@ struct ImageScheduleCandidate: Identifiable, Codable, Hashable, Sendable {
     var timezone: String
     var confidence: Double
     var sourceEvidence: String
+    var guidanceEvidence: String?
+    var conflictNote: String?
     var needsReview: Bool
     var recurrence: ImageScheduleRecurrence
 
@@ -235,6 +298,7 @@ struct ImageScheduleCandidate: Identifiable, Codable, Hashable, Sendable {
         id: UUID = UUID(), title: String, detail: String = "", startAt: Date? = nil,
         endAt: Date? = nil, timezone: String = TimeZone.current.identifier,
         confidence: Double, sourceEvidence: String = "", needsReview: Bool = false,
+        guidanceEvidence: String? = nil, conflictNote: String? = nil,
         recurrence: ImageScheduleRecurrence = .none
     ) {
         self.id = id
@@ -245,6 +309,8 @@ struct ImageScheduleCandidate: Identifiable, Codable, Hashable, Sendable {
         self.timezone = timezone
         self.confidence = confidence
         self.sourceEvidence = sourceEvidence
+        self.guidanceEvidence = guidanceEvidence
+        self.conflictNote = conflictNote
         self.needsReview = needsReview
         self.recurrence = recurrence
     }

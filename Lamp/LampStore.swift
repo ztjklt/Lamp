@@ -34,6 +34,18 @@ final class LampStore: ObservableObject {
 
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
             apply(DemoData.snapshot(calendar: calendar))
+            if ProcessInfo.processInfo.arguments.contains("-mock-recurring-schedule") {
+                let today = calendar.startOfDay(for: .now)
+                recurringSchedules.append(RecurringScheduleRule(
+                    title: "每周设计复盘",
+                    detail: "用于验证单次与整组删除",
+                    startsOn: today,
+                    weekdays: [calendar.component(.weekday, from: today)],
+                    startMinute: 16 * 60 + 30,
+                    durationMinutes: 45,
+                    timezone: calendar.timeZone.identifier
+                ))
+            }
             hasCompletedOnboarding = !ProcessInfo.processInfo.arguments.contains("-show-onboarding")
         }
     }
@@ -318,6 +330,82 @@ final class LampStore: ObservableObject {
             blocks[index].provenance = "手动调整"
         }
         toast = "日程已更新"
+        save()
+        return true
+    }
+
+    @discardableResult
+    func deleteScheduleBlock(
+        _ block: ScheduleBlock,
+        scope: ScheduleDeletionScope = .singleOccurrence
+    ) -> Bool {
+        if let ruleID = block.recurringRuleID {
+            guard recurringSchedules.contains(where: { $0.id == ruleID }) else {
+                toast = "找不到这条重复日程"
+                return false
+            }
+            beginTransaction(scope == .entireSeries ? "已恢复整个重复日程" : "已恢复本次日程")
+            guard ScheduleDeletionEngine.delete(
+                block: block,
+                scope: scope,
+                blocks: &blocks,
+                recurringSchedules: &recurringSchedules,
+                occurrenceOverrides: &occurrenceOverrides,
+                calendar: calendar
+            ) else {
+                undoTransaction = nil
+                toast = "无法确定要删除的日程范围"
+                return false
+            }
+            toast = scope == .entireSeries ? "已从 Lamp 删除整个重复日程" : "已从 Lamp 删除本次日程"
+            save()
+            return true
+        }
+
+        guard blocks.contains(where: { $0.id == block.id }) else {
+            toast = "这条日程已经不存在"
+            return false
+        }
+        beginTransaction("已恢复删除的日程")
+        guard ScheduleDeletionEngine.delete(
+            block: block,
+            scope: scope,
+            blocks: &blocks,
+            recurringSchedules: &recurringSchedules,
+            occurrenceOverrides: &occurrenceOverrides,
+            calendar: calendar
+        ) else {
+            undoTransaction = nil
+            toast = "这条日程已经不存在"
+            return false
+        }
+        if block.kind == .fixed {
+            toast = "已从 Lamp 删除，不会修改“\(block.provenance)”中的原日程"
+        } else if block.planItemID != nil {
+            toast = "已删除这个时段，关联任务仍然保留"
+        } else {
+            toast = "已从 Lamp 删除日程"
+        }
+        save()
+        return true
+    }
+
+    @discardableResult
+    func deletePlanItem(_ item: PlanItem) -> Bool {
+        guard planItems.contains(where: { $0.id == item.id }) else {
+            toast = "这项计划已经不存在"
+            return false
+        }
+        beginTransaction("已恢复删除的计划")
+        guard ScheduleDeletionEngine.delete(item: item, planItems: &planItems, blocks: &blocks) else {
+            undoTransaction = nil
+            toast = "这项计划已经不存在"
+            return false
+        }
+        if pendingWeeklySchedule?.item.id == item.id { pendingWeeklySchedule = nil }
+        toast = item.kind == .goal
+            ? "已删除年度目标，关联计划已转为未关联"
+            : "已删除计划和它的日程时段"
         save()
         return true
     }

@@ -80,12 +80,93 @@ final class LampUITests: XCTestCase {
     func testMockVisionCandidateCanBeReviewedAndImported() {
         launch(extraArguments: ["-mock-image-analysis"])
         app.descendants(matching: .any)["global.tellLamp"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.cancelImage"].waitForExistence(timeout: 3))
+        let input = app.descendants(matching: .any)["tellLamp.input"]
+        input.tap()
+        input.typeText("图片中的时间改为周三下午四点")
+        app.descendants(matching: .any)["tellLamp.send"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["tellLamp.imageReview"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.imageGuidanceUsed"].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'imageCandidate.guidanceConflict.'")).firstMatch.exists)
         XCTAssertTrue(app.descendants(matching: .any)["tellLamp.importImage"].isEnabled)
         app.descendants(matching: .any)["tellLamp.importImage"].tap()
         XCTAssertTrue(app.tabBars.buttons["今天"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["产品评审"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 3))
+    }
+
+    func testImageGuidanceCanReplaceExistingCandidates() {
+        launch(extraArguments: ["-mock-image-analysis"])
+        app.descendants(matching: .any)["global.tellLamp"].tap()
+        let input = app.descendants(matching: .any)["tellLamp.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 3))
+        input.tap()
+        input.typeText("先按图片识别")
+        app.descendants(matching: .any)["tellLamp.send"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.imageReview"].waitForExistence(timeout: 3))
+
+        for _ in 0..<3 where !input.isHittable { app.swipeUp() }
+        input.tap()
+        input.typeText("改成周三下午四点")
+        let send = app.descendants(matching: .any)["tellLamp.send"]
+        if !send.isHittable { app.swipeUp() }
+        send.tap()
+        let confirm = app.buttons["tellLamp.confirmReanalyze"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 2))
+        confirm.tap()
+        XCTAssertTrue(app.staticTexts["改成周三下午四点"].waitForExistence(timeout: 3))
+    }
+
+    func testFixedScheduleCanBeDeletedLocallyAndUndone() {
+        launch()
+        let fixed = app.staticTexts["课程：金融学"]
+        XCTAssertTrue(fixed.waitForExistence(timeout: 3))
+        fixed.tap()
+        let delete = app.buttons["taskEditor.delete"]
+        if !delete.isHittable { app.swipeUp() }
+        XCTAssertTrue(delete.waitForExistence(timeout: 2))
+        delete.tap()
+        let confirmDelete = app.buttons["taskEditor.confirmDelete"].firstMatch
+        XCTAssertTrue(confirmDelete.waitForExistence(timeout: 2))
+        confirmDelete.tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.staticTexts["课程：金融学"].exists)
+        app.buttons["撤销"].tap()
+        XCTAssertTrue(app.staticTexts["课程：金融学"].waitForExistence(timeout: 3))
+    }
+
+    func testRecurringScheduleOffersSingleAndSeriesDeletion() {
+        launch(extraArguments: ["-mock-recurring-schedule"])
+        let recurring = app.staticTexts["每周设计复盘"]
+        for _ in 0..<4 where !recurring.isHittable { app.swipeUp() }
+        XCTAssertTrue(recurring.waitForExistence(timeout: 3))
+        recurring.tap()
+        let delete = app.buttons["taskEditor.delete"]
+        if !delete.isHittable { app.swipeUp() }
+        delete.tap()
+        XCTAssertTrue(app.buttons["仅删除本次"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["删除整个重复日程"].exists)
+        app.buttons["taskEditor.deleteSingle"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 3))
+    }
+
+    func testRoadmapGoalCanBeDeletedWithoutDeletingChildrenAndUndone() {
+        launch()
+        app.tabBars.buttons["路线"].tap()
+        let goal = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'roadmap.goal.'")).firstMatch
+        XCTAssertTrue(goal.waitForExistence(timeout: 2))
+        goal.tap()
+        let edit = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'roadmap.edit.'")).firstMatch
+        edit.tap()
+        let delete = app.buttons["goalEditor.delete"]
+        if !delete.isHittable { app.swipeUp() }
+        delete.tap()
+        let confirmDelete = app.buttons["goalEditor.confirmDelete"].firstMatch
+        XCTAssertTrue(confirmDelete.waitForExistence(timeout: 2))
+        confirmDelete.tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 3))
+        app.buttons["撤销"].tap()
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'roadmap.goal.'")).firstMatch.waitForExistence(timeout: 3))
     }
 
     func testMemoryEditingAndPrivacyControlsHaveOutcomes() {

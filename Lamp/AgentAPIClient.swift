@@ -84,17 +84,19 @@ enum AgentAPIClient {
 
     static func analyzeScheduleImage(
         _ image: ImageIngestionService.PreparedImage,
+        guidance: String = "",
         referenceDate: Date = .now,
         timezone: TimeZone = .current,
         locale: Locale = .current
     ) async throws -> ImageScheduleAnalysisResponse {
         let token = try await SupabaseAnonymousSession.shared.accessToken()
         let body = ImageAnalysisRequest(
-            schemaVersion: 1,
+            schemaVersion: 2,
             idempotencyKey: UUID().uuidString,
             timezone: timezone.identifier,
             locale: locale.identifier,
             referenceDate: ISO8601DateFormatter().string(from: referenceDate),
+            guidance: String(guidance.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1_200)),
             image: .init(mimeType: image.mimeType, base64: image.base64, sha256: image.sha256)
         )
         let encoded = try JSONEncoder().encode(body)
@@ -167,6 +169,7 @@ enum AgentAPIClient {
         var timezone: String
         var locale: String
         var referenceDate: String
+        var guidance: String
         var image: ImagePayload
     }
 

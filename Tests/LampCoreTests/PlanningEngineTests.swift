@@ -235,6 +235,105 @@ struct PlanningEngineTests {
         #expect(response.candidates.first?.recurrence.kind == .weekly)
         #expect(response.candidates.first?.recurrence.weekdays == [2])
         #expect(response.candidates.first?.startAt != nil)
+        #expect(response.candidates.first?.guidanceEvidence == nil)
+        #expect(response.candidates.first?.conflictNote == nil)
+    }
+
+    @Test("vision response preserves guidance evidence and conflict notes")
+    func guidedVisionResponseDecoding() throws {
+        let json = #"{"analysisID":"8A62C0F3-5D30-46A6-9B9C-C7CA21F70A92","summary":"结合说明修正时间","candidates":[{"id":"0B7D8D22-3FC7-438E-8C22-D4A58FF639B0","title":"设计课","detail":"","startAt":"2026-09-09T16:00:00Z","endAt":"2026-09-09T17:00:00Z","timezone":"UTC","confidence":0.91,"sourceEvidence":"图片显示周三 15:00","guidanceEvidence":"实际改为周三 16:00","conflictNote":"说明与图片时间不同","needsReview":true,"recurrence":{"kind":"none","weekdays":[],"startsOn":null,"endsOn":null}}],"warnings":[]}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(ImageScheduleAnalysisResponse.self, from: Data(json.utf8))
+        #expect(response.candidates.first?.guidanceEvidence == "实际改为周三 16:00")
+        #expect(response.candidates.first?.conflictNote == "说明与图片时间不同")
+        #expect(response.candidates.first?.needsReview == true)
+    }
+
+    @Test("all one-off schedule categories can be deleted without deleting their plan")
+    func deletesAllOneOffBlockKinds() {
+        let item = PlanItem(kind: .task, title: "保留任务")
+        var blocks = BlockKind.allTestCases.enumerated().map { index, kind in
+            ScheduleBlock(
+                planItemID: index == 1 ? item.id : nil,
+                title: "Block \(index)",
+                start: calendar.date(on: day, hour: 8 + index),
+                end: calendar.date(on: day, hour: 9 + index),
+                kind: kind
+            )
+        }
+        var rules: [RecurringScheduleRule] = []
+        var overrides: [ScheduleOccurrenceOverride] = []
+        let originals = blocks
+        for block in originals {
+            #expect(ScheduleDeletionEngine.delete(
+                block: block,
+                scope: .singleOccurrence,
+                blocks: &blocks,
+                recurringSchedules: &rules,
+                occurrenceOverrides: &overrides,
+                calendar: calendar
+            ))
+        }
+        #expect(blocks.isEmpty)
+        #expect(item.title == "保留任务")
+    }
+
+    @Test("recurring deletion supports one occurrence and the whole series")
+    func recurringDeletionScopes() {
+        let rule = RecurringScheduleRule(
+            title: "每周课程",
+            detail: "",
+            startsOn: day,
+            weekdays: [calendar.component(.weekday, from: day)],
+            startMinute: 10 * 60,
+            durationMinutes: 60,
+            timezone: "UTC"
+        )
+        let occurrence = RecurringScheduleEngine.occurrence(for: rule, on: day, calendar: calendar)!
+        var blocks: [ScheduleBlock] = []
+        var rules = [rule]
+        var overrides: [ScheduleOccurrenceOverride] = []
+        #expect(ScheduleDeletionEngine.delete(
+            block: occurrence,
+            scope: .singleOccurrence,
+            blocks: &blocks,
+            recurringSchedules: &rules,
+            occurrenceOverrides: &overrides,
+            calendar: calendar
+        ))
+        #expect(rules.count == 1)
+        #expect(overrides.first?.isCancelled == true)
+        #expect(RecurringScheduleEngine.occurrence(for: rule, on: day, override: overrides.first, calendar: calendar) == nil)
+
+        #expect(ScheduleDeletionEngine.delete(
+            block: occurrence,
+            scope: .entireSeries,
+            blocks: &blocks,
+            recurringSchedules: &rules,
+            occurrenceOverrides: &overrides,
+            calendar: calendar
+        ))
+        #expect(rules.isEmpty)
+        #expect(overrides.isEmpty)
+    }
+
+    @Test("deleting a plan removes its blocks and detaches child plans")
+    func planDeletionDetachesChildren() {
+        let goal = PlanItem(kind: .goal, title: "年度目标")
+        let child = PlanItem(parentID: goal.id, kind: .milestone, title: "月度里程碑")
+        var items = [goal, child]
+        var blocks = [ScheduleBlock(
+            planItemID: goal.id,
+            title: goal.title,
+            start: calendar.date(on: day, hour: 10),
+            end: calendar.date(on: day, hour: 11),
+            kind: .focus
+        )]
+        #expect(ScheduleDeletionEngine.delete(item: goal, planItems: &items, blocks: &blocks))
+        #expect(items.count == 1)
+        #expect(items.first?.parentID == nil)
+        #expect(blocks.isEmpty)
     }
 
     @Test("planning periods round-trip and old items decode without them")
@@ -267,4 +366,8 @@ struct PlanningEngineTests {
         )
         #expect(blocks.first?.start ?? .distantPast >= start)
     }
+}
+
+private extension BlockKind {
+    static let allTestCases: [BlockKind] = [.fixed, .focus, .breakTime, .free]
 }

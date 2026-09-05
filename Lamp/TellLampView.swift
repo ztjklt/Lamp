@@ -18,6 +18,7 @@ struct TellLampView: View {
     @StateObject private var speech = SpeechService()
     @State private var text = ""
     @State private var lastSubmitted = ""
+    @State private var lastImageGuidance = ""
     @State private var response: String?
     @State private var phase: TellLampPhase = .idle
     @State private var photo: PhotosPickerItem?
@@ -28,6 +29,7 @@ struct TellLampView: View {
     @State private var selectedCandidateIDs: Set<UUID> = []
     @State private var fallbackOCRLines: [String] = []
     @State private var editingCandidate: ImageScheduleCandidate?
+    @State private var showingReplaceConfirmation = false
     @FocusState private var focused: Bool
 
     private let suggestions = ["我今天很累", "明天下午 3 点开会", "我想系统学习 AI"]
@@ -51,13 +53,22 @@ struct TellLampView: View {
                     if analysis != nil { scheduleReview }
                     if !fallbackOCRLines.isEmpty { fallbackOCRCard }
 
-                    TextField("例如：我今晚很累，把计划放轻一点", text: $text, axis: .vertical)
+                    TextField(inputPlaceholder, text: $text, axis: .vertical)
                         .lineLimit(3...7)
                         .focused($focused)
                         .padding(16)
                         .background(LampTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(LampTheme.hairline))
                         .accessibilityIdentifier("tellLamp.input")
+
+                    if preparedImage != nil {
+                        HStack {
+                            Text("说明会和图片一起交给 DeepSeek")
+                            Spacer()
+                            Text("\(text.count)/1200")
+                        }
+                        .font(.caption2).foregroundStyle(.secondary)
+                    }
 
                     ScrollView(.horizontal) {
                         HStack(spacing: 8) {
@@ -91,7 +102,7 @@ struct TellLampView: View {
                                     .accessibilityIdentifier("tellLamp.retryImage")
                             }
                             if !lastSubmitted.isEmpty {
-                                Button("重试文字发送") { send(lastSubmitted) }
+                                Button("重试文字发送") { sendText(lastSubmitted) }
                                     .buttonStyle(.lamp)
                                     .accessibilityIdentifier("tellLamp.retry")
                             }
@@ -121,10 +132,13 @@ struct TellLampView: View {
             .onChange(of: speech.transcript) { _, value in
                 if !value.isEmpty { text = value }
             }
-            .onChange(of: photo) { _, item in analyze(item) }
+            .onChange(of: photo) { _, item in prepareImage(item) }
+            .onChange(of: text) { _, value in
+                if preparedImage != nil, value.count > 1_200 { text = String(value.prefix(1_200)) }
+            }
             .onAppear {
-                if ProcessInfo.processInfo.arguments.contains("-mock-image-analysis"), analysis == nil {
-                    loadMockAnalysis()
+                if ProcessInfo.processInfo.arguments.contains("-mock-image-analysis"), preparedImage == nil {
+                    loadMockImageDraft()
                 }
             }
             .sheet(item: $editingCandidate) { candidate in
@@ -137,6 +151,13 @@ struct TellLampView: View {
                 }
             }
             .sensoryFeedback(.success, trigger: phase == .answered)
+            .alert("按新说明重新识别？", isPresented: $showingReplaceConfirmation) {
+                Button("取消", role: .cancel) {}
+                Button("替换当前候选") { analyzePreparedImage() }
+                    .accessibilityIdentifier("tellLamp.confirmReanalyze")
+            } message: {
+                Text("重新识别会替换当前尚未导入的候选，已写入时间线的内容不会改变。")
+            }
         }
     }
 
@@ -152,6 +173,12 @@ struct TellLampView: View {
         case .sending: return "正在理解"
         default: return "告诉 Lamp"
         }
+    }
+
+    private var inputPlaceholder: String {
+        preparedImage == nil
+            ? "例如：我今晚很累，把计划放轻一点"
+            : "补充说明（可选），例如：图片里的时间改为每周三下午 4 点"
     }
 
     private var actionRow: some View {
@@ -175,20 +202,25 @@ struct TellLampView: View {
             .disabled(isBusy)
             .accessibilityIdentifier("tellLamp.voice")
 
-            Button { send(text) } label: {
+            Button { submitComposer() } label: {
                 Group {
-                    if phase == .sending {
+                    if phase == .sending || phase == .analyzingImage {
                         ProgressView().tint(.white)
                     } else {
-                        Label("发送", systemImage: "arrow.up")
+                        Label(preparedImage == nil ? "发送" : (analysis == nil ? "识别" : "重新识别"), systemImage: "arrow.up")
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.lampProminent)
-            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isBusy)
+            .disabled(!canSubmit || isBusy)
             .accessibilityIdentifier("tellLamp.send")
         }
+    }
+
+    private var canSubmit: Bool {
+        if previewImage != nil { return preparedImage != nil }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func responseCard(_ response: String) -> some View {
@@ -218,7 +250,7 @@ struct TellLampView: View {
                 }
                 VStack(alignment: .leading, spacing: 5) {
                     Text("待分析的日程图片").font(.headline)
-                    Text(isBusy ? "正在安全处理，原图不会被保存" : "可重新分析或取消")
+                    Text(imagePreviewSubtitle)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -230,6 +262,13 @@ struct TellLampView: View {
         }
     }
 
+    private var imagePreviewSubtitle: String {
+        if phase == .preparingImage { return "正在本机压缩，原图不会被保存" }
+        if phase == .analyzingImage { return "正在结合图片和你的说明进行识别" }
+        if analysis != nil { return "识别完成，可编辑候选或按新说明重新识别" }
+        return "图片已准备好，可补充说明后发送"
+    }
+
     private var scheduleReview: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let analysis {
@@ -238,6 +277,13 @@ struct TellLampView: View {
                         Label("AI 概括", systemImage: "sparkles.rectangle.stack")
                             .font(.headline)
                         Text(analysis.summary).font(.subheadline)
+                        if !lastImageGuidance.isEmpty {
+                            Divider()
+                            Label("你的说明", systemImage: "text.bubble.fill")
+                                .font(.caption.weight(.semibold)).foregroundStyle(LampTheme.amber)
+                            Text(lastImageGuidance).font(.caption).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("tellLamp.imageGuidanceUsed")
+                        }
                         ForEach(analysis.warnings, id: \.self) { warning in
                             Label(warning, systemImage: "exclamationmark.triangle")
                                 .font(.caption).foregroundStyle(LampTheme.amber)
@@ -297,8 +343,17 @@ struct TellLampView: View {
                 }
 
                 if !candidate.sourceEvidence.isEmpty {
-                    Text("依据：\(candidate.sourceEvidence)")
+                    Text("图片依据：\(candidate.sourceEvidence)")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                }
+                if let guidanceEvidence = candidate.guidanceEvidence, !guidanceEvidence.isEmpty {
+                    Text("说明依据：\(guidanceEvidence)")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                }
+                if let conflictNote = candidate.conflictNote, !conflictNote.isEmpty {
+                    Label(conflictNote, systemImage: "arrow.trianglehead.branch")
+                        .font(.caption.weight(.semibold)).foregroundStyle(LampTheme.amber)
+                        .accessibilityIdentifier("imageCandidate.guidanceConflict.\(candidate.id.uuidString)")
                 }
                 if let issue {
                     Label(issue, systemImage: "exclamationmark.octagon.fill")
@@ -332,15 +387,18 @@ struct TellLampView: View {
         return !selected.isEmpty && selected.allSatisfy { store.conflictDescription(for: $0) == nil }
     }
 
-    private func analyze(_ item: PhotosPickerItem?) {
+    private func prepareImage(_ item: PhotosPickerItem?) {
         guard let item else { return }
         speech.stop()
         phase = .preparingImage
-        response = "正在压缩并保护图片隐私…"
+        response = "正在本机准备图片…"
+        previewImage = nil
+        preparedImage = nil
         analysis = nil
         candidates = []
         selectedCandidateIDs = []
         fallbackOCRLines = []
+        lastImageGuidance = ""
         Task {
             do {
                 guard let data = try await item.loadTransferable(type: Data.self) else {
@@ -349,15 +407,52 @@ struct TellLampView: View {
                 previewImage = UIImage(data: data)
                 let prepared = try await ImageIngestionService.prepareForVision(data)
                 preparedImage = prepared
-                phase = .analyzingImage
-                response = "正在识别文字、日期和重复规则…"
-                applyAnalysis(try await AgentAPIClient.analyzeScheduleImage(prepared))
+                phase = .idle
+                response = nil
+                focused = true
             } catch {
                 phase = .failed
                 response = error.localizedDescription
-                if let data = try? await item.loadTransferable(type: Data.self) {
-                    fallbackOCRLines = (try? await ImageIngestionService.recognizeText(in: data)) ?? []
-                }
+            }
+        }
+    }
+
+    private func submitComposer() {
+        if preparedImage != nil {
+            if analysis != nil {
+                showingReplaceConfirmation = true
+            } else {
+                analyzePreparedImage()
+            }
+        } else {
+            sendText(text)
+        }
+    }
+
+    private func analyzePreparedImage() {
+        guard let preparedImage else { return }
+        let entered = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let guidance = entered.isEmpty ? lastImageGuidance : String(entered.prefix(1_200))
+        lastImageGuidance = guidance
+        phase = .analyzingImage
+        response = guidance.isEmpty ? "正在识别图片中的日程…" : "正在结合图片和你的说明整理日程…"
+        fallbackOCRLines = []
+        if ProcessInfo.processInfo.arguments.contains("-mock-image-analysis") {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(250))
+                loadMockAnalysis(guidance: guidance)
+                text = ""
+            }
+            return
+        }
+        Task {
+            do {
+                applyAnalysis(try await AgentAPIClient.analyzeScheduleImage(preparedImage, guidance: guidance))
+                text = ""
+            } catch {
+                phase = .failed
+                response = error.localizedDescription
+                fallbackOCRLines = (try? await ImageIngestionService.recognizeText(in: preparedImage.data)) ?? []
             }
         }
     }
@@ -367,8 +462,15 @@ struct TellLampView: View {
         phase = .analyzingImage
         response = "正在重新分析图片…"
         fallbackOCRLines = []
+        if ProcessInfo.processInfo.arguments.contains("-mock-image-analysis") {
+            loadMockAnalysis(guidance: lastImageGuidance)
+            return
+        }
         Task {
-            do { applyAnalysis(try await AgentAPIClient.analyzeScheduleImage(preparedImage)) }
+            do {
+                applyAnalysis(try await AgentAPIClient.analyzeScheduleImage(preparedImage, guidance: lastImageGuidance))
+                text = ""
+            }
             catch {
                 phase = .failed
                 response = error.localizedDescription
@@ -411,11 +513,12 @@ struct TellLampView: View {
         candidates = []
         selectedCandidateIDs = []
         fallbackOCRLines = []
+        lastImageGuidance = ""
         response = nil
         phase = .idle
     }
 
-    private func send(_ value: String) {
+    private func sendText(_ value: String) {
         let input = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else { return }
         speech.stop()
@@ -452,7 +555,23 @@ struct TellLampView: View {
             .background((needsReview ? LampTheme.amber : LampTheme.sage).opacity(0.12), in: Capsule())
     }
 
-    private func loadMockAnalysis() {
+    private func loadMockImageDraft() {
+        let image = UIImage(systemName: "calendar") ?? UIImage()
+        previewImage = image
+        phase = .preparingImage
+        Task {
+            guard let data = image.pngData(), let prepared = try? await ImageIngestionService.prepareForVision(data) else {
+                phase = .failed
+                response = "无法准备测试图片"
+                return
+            }
+            preparedImage = prepared
+            phase = .idle
+            response = nil
+        }
+    }
+
+    private func loadMockAnalysis(guidance: String) {
         let today = Calendar.current.startOfDay(for: .now)
         let start = Calendar.current.date(bySettingHour: 21, minute: 0, second: 0, of: today) ?? .now
         let end = Calendar.current.date(byAdding: .hour, value: 1, to: start) ?? start
@@ -462,9 +581,11 @@ struct TellLampView: View {
             startAt: start,
             endAt: end,
             confidence: 0.94,
-            sourceEvidence: "明天下午产品评审 1 小时"
+            sourceEvidence: "图片显示下午产品评审 1 小时",
+            needsReview: !guidance.isEmpty,
+            guidanceEvidence: guidance.isEmpty ? nil : guidance,
+            conflictNote: guidance.isEmpty ? nil : "已按你的说明修正图片信息，请确认"
         )
-        previewImage = UIImage(systemName: "calendar")
         applyAnalysis(ImageScheduleAnalysisResponse(
             analysisID: UUID(),
             summary: "图片包含一项今晚的产品评审安排。",

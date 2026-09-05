@@ -398,6 +398,7 @@ private struct PlanEditorView: View {
     @State private var hasDeadline: Bool
     @State private var deadline: Date
     @State private var parentID: UUID?
+    @State private var showingDeleteConfirmation = false
 
     init(context: PlanEditorContext) {
         self.context = context
@@ -438,6 +439,19 @@ private struct PlanEditorView: View {
                 if context.timeframe == .week, context.item == nil {
                     Section { Text("保存后会先展示排程预览，确认前不会修改时间线。").font(.footnote).foregroundStyle(.secondary) }
                 }
+                if context.item != nil {
+                    Section {
+                        Button(role: .destructive) {
+                            showingDeleteConfirmation = true
+                        } label: {
+                            Label("删除这项计划", systemImage: "trash")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .accessibilityIdentifier("planEditor.delete")
+                    } footer: {
+                        Text(deleteExplanation)
+                    }
+                }
             }
             .navigationTitle(context.item == nil ? "新增计划" : "编辑计划")
             .navigationBarTitleDisplayMode(.inline)
@@ -449,12 +463,30 @@ private struct PlanEditorView: View {
                 }
             }
         }
+        .alert("删除这项计划？", isPresented: $showingDeleteConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("删除计划", role: .destructive) {
+                guard let item = context.item else { return }
+                if store.deletePlanItem(item) { dismiss() }
+            }
+            .accessibilityIdentifier("planEditor.confirmDelete")
+        } message: {
+            Text(deleteExplanation)
+        }
     }
 
     private var parentGoals: [PlanItem] { store.planItems.filter { $0.kind == .goal && $0.id != context.item?.id } }
     private var allowedDates: ClosedRange<Date> {
         let range = store.periodInterval(for: context.timeframe, containing: context.anchorDate)
         return range.start...range.end.addingTimeInterval(-1)
+    }
+
+    private var deleteExplanation: String {
+        guard let item = context.item else { return "" }
+        if item.kind == .goal || item.kind == .milestone {
+            return "会删除“\(item.title)”及它直接关联的时间块；下级计划会保留并转为未关联。删除后可以撤销。"
+        }
+        return "会删除“\(item.title)”及其关联时间块。删除后可以撤销。"
     }
 
     private func save() {
