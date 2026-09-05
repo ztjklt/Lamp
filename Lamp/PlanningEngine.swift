@@ -109,7 +109,13 @@ struct PlanningEngine: Sendable {
         usedByDay: [Date: Int], dailyBudget: Int, context: PlanningContext
     ) -> Date? {
         var candidates: [Date] = []
-        var cursor = calendar.date(on: context.horizonStart, hour: context.workingHours.lowerBound)
+        let workingDayStart = calendar.date(on: context.horizonStart, hour: context.workingHours.lowerBound)
+        var cursor = max(context.horizonStart, workingDayStart)
+        let minute = calendar.component(.minute, from: cursor)
+        if minute % 30 != 0 || calendar.component(.second, from: cursor) != 0 {
+            cursor = calendar.date(byAdding: .minute, value: 30 - minute % 30, to: cursor) ?? cursor
+            cursor = calendar.date(bySetting: .second, value: 0, of: cursor) ?? cursor
+        }
         while cursor.addingTimeInterval(TimeInterval(minutes * 60)) <= context.horizonEnd {
             let hour = calendar.component(.hour, from: cursor)
             let day = calendar.startOfDay(for: cursor)
@@ -142,4 +148,3 @@ struct PlanningEngine: Sendable {
         }
     }
 }
-

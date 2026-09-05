@@ -28,7 +28,7 @@ final class LampUITests: XCTestCase {
 
         let destinations = [
             (tab: "今天", marker: "today.now.details"),
-            (tab: "本周", marker: "本周"),
+            (tab: "日程", marker: "日程"),
             (tab: "路线", marker: "路线"),
             (tab: "我的", marker: "Lamp 了解的你")
         ]
@@ -125,7 +125,7 @@ final class LampUITests: XCTestCase {
 
     func testWeekSelectionRuleToggleAndMemoryDeleteUndo() {
         launch()
-        app.tabBars.buttons["本周"].tap()
+        app.tabBars.buttons["日程"].tap()
         let day = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'week.day.'")).element(boundBy: 1)
         XCTAssertTrue(day.waitForExistence(timeout: 2))
         day.tap()
@@ -159,6 +159,55 @@ final class LampUITests: XCTestCase {
         XCTAssertTrue(app.alerts.buttons["永久删除"].waitForExistence(timeout: 2))
         app.alerts.buttons["永久删除"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["onboarding.continue"].waitForExistence(timeout: 3))
+    }
+
+    func testScheduleNavigatesWeekMonthAndYear() {
+        launch()
+        app.tabBars.buttons["日程"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["schedule.add"].waitForExistence(timeout: 3))
+
+        app.segmentedControls.buttons["月"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["schedule.month.day.1"].waitForExistence(timeout: 3))
+        app.descendants(matching: .any)["schedule.next"].tap()
+        app.descendants(matching: .any)["schedule.current"].tap()
+
+        app.segmentedControls.buttons["年"].tap()
+        let firstMonth = app.descendants(matching: .any)["schedule.year.month.1"]
+        XCTAssertTrue(firstMonth.waitForExistence(timeout: 3))
+        firstMonth.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["schedule.month.day.1"].waitForExistence(timeout: 3))
+    }
+
+    func testWeeklyPlanUsesPreviewBeforeWritingTimeline() {
+        launch()
+        app.tabBars.buttons["日程"].tap()
+        app.descendants(matching: .any)["schedule.add"].tap()
+        let title = app.textFields["planEditor.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 2))
+        title.tap()
+        title.typeText("本周交互回归")
+        app.buttons["planEditor.save"].tap()
+
+        let apply = app.buttons["weeklyPreview.apply"].firstMatch
+        XCTAssertTrue(apply.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["本周交互回归"].exists)
+        apply.tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 4))
+    }
+
+    func testAnnualGoalCreatedInScheduleAppearsInRoadmap() {
+        launch()
+        app.tabBars.buttons["日程"].tap()
+        app.segmentedControls.buttons["年"].tap()
+        app.descendants(matching: .any)["schedule.add"].tap()
+        let title = app.textFields["planEditor.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 2))
+        title.tap()
+        title.typeText("年度产品愿景")
+        app.buttons["planEditor.save"].tap()
+
+        app.tabBars.buttons["路线"].tap()
+        XCTAssertTrue(app.staticTexts["年度产品愿景"].waitForExistence(timeout: 3))
     }
 
     private func launch(showOnboarding: Bool = false, extraArguments: [String] = []) {

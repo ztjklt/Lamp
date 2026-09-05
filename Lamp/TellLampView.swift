@@ -427,7 +427,7 @@ struct TellLampView: View {
             response = await store.processWithAgent(input: input)
             phase = .answered
             text = ""
-            if store.pendingReplan != nil { dismiss() }
+            if store.pendingReplan != nil || store.pendingWeeklySchedule != nil { dismiss() }
         }
     }
 

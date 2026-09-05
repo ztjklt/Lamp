@@ -27,6 +27,23 @@ enum MemoryStatus: String, Codable, Sendable {
     case inferred, proposed, confirmed
 }
 
+enum PlanTimeframe: String, Codable, CaseIterable, Hashable, Sendable {
+    case week, month, year
+
+    var title: String {
+        switch self {
+        case .week: "周"
+        case .month: "月"
+        case .year: "年"
+        }
+    }
+}
+
+struct PlanningPeriod: Codable, Hashable, Sendable {
+    var timeframe: PlanTimeframe
+    var anchorDate: Date
+}
+
 struct PlanItem: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var parentID: UUID?
@@ -42,13 +59,15 @@ struct PlanItem: Identifiable, Codable, Hashable, Sendable {
     var isSplittable: Bool
     var preferredPeriod: DayPeriod?
     var dependencyIDs: [UUID]
+    var planningPeriod: PlanningPeriod?
 
     init(
         id: UUID = UUID(), parentID: UUID? = nil, kind: PlanKind, title: String,
         detail: String = "", importance: Int = 3, deadline: Date? = nil,
         estimatedMinutes: Int = 60, remainingMinutes: Int? = nil, progress: Double = 0,
         isPaused: Bool = false, isSplittable: Bool = true,
-        preferredPeriod: DayPeriod? = nil, dependencyIDs: [UUID] = []
+        preferredPeriod: DayPeriod? = nil, dependencyIDs: [UUID] = [],
+        planningPeriod: PlanningPeriod? = nil
     ) {
         self.id = id
         self.parentID = parentID
@@ -64,6 +83,7 @@ struct PlanItem: Identifiable, Codable, Hashable, Sendable {
         self.isSplittable = isSplittable
         self.preferredPeriod = preferredPeriod
         self.dependencyIDs = dependencyIDs
+        self.planningPeriod = planningPeriod
     }
 }
 
@@ -360,6 +380,28 @@ struct ReplanProposal: Identifiable, Codable, Hashable, Sendable {
     var changes: [String]
     var reason: String
     var proposedBlocks: [ScheduleBlock]
+}
+
+struct WeeklyScheduleProposal: Identifiable, Hashable, Sendable {
+    var id: UUID = UUID()
+    var item: PlanItem
+    var weekStart: Date
+    var suggestedBlocks: [ScheduleBlock]
+    var warnings: [String]
+}
+
+struct SchedulePeriodSummary: Equatable, Sendable {
+    var totalMinutes: Int
+    var focusMinutes: Int
+    var completedMinutes: Int
+    var fixedEventCount: Int
+    var blockCount: Int
+    var focusMinutesByDay: [Date: Int]
+
+    var completion: Double {
+        guard focusMinutes > 0 else { return 0 }
+        return min(1, max(0, Double(completedMinutes) / Double(focusMinutes)))
+    }
 }
 
 struct LampSnapshot: Codable, Sendable {

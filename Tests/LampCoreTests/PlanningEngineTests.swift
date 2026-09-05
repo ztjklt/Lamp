@@ -236,4 +236,35 @@ struct PlanningEngineTests {
         #expect(response.candidates.first?.recurrence.weekdays == [2])
         #expect(response.candidates.first?.startAt != nil)
     }
+
+    @Test("planning periods round-trip and old items decode without them")
+    func planningPeriodCompatibility() throws {
+        let original = DemoData.snapshot(now: day, calendar: calendar)
+        let encoded = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(LampSnapshot.self, from: encoded)
+        #expect(decoded.planItems.contains { $0.planningPeriod?.timeframe == .year })
+
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var items = try #require(object["planItems"] as? [[String: Any]])
+        for index in items.indices { items[index].removeValue(forKey: "planningPeriod") }
+        object["planItems"] = items
+        let legacy = try JSONDecoder().decode(
+            LampSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+        #expect(legacy.planItems.allSatisfy { $0.planningPeriod == nil })
+    }
+
+    @Test("scheduling never starts before a mid-day horizon")
+    func respectsExactHorizonStart() {
+        let task = PlanItem(kind: .task, title: "Late request", estimatedMinutes: 60)
+        let start = calendar.date(on: day, hour: 15, minute: 20)
+        let end = calendar.date(on: day, hour: 21)
+        let blocks = PlanningEngine(calendar: calendar).makeSchedule(
+            items: [task],
+            fixed: [],
+            context: PlanningContext(horizonStart: start, horizonEnd: end)
+        )
+        #expect(blocks.first?.start ?? .distantPast >= start)
+    }
 }

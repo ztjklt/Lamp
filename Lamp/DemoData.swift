@@ -3,24 +3,39 @@ import Foundation
 enum DemoData {
     static func snapshot(now: Date = .now, calendar: Calendar = .current) -> LampSnapshot {
         let today = calendar.startOfDay(for: now)
+        let weekPeriod = PlanningPeriod(timeframe: .week, anchorDate: today)
+        let monthPeriod = PlanningPeriod(timeframe: .month, anchorDate: today)
+        let yearPeriod = PlanningPeriod(timeframe: .year, anchorDate: today)
         var calculus = PlanItem(
             kind: .task, title: "微积分复习", detail: "第 4 章 · 积分应用", importance: 5,
             deadline: calendar.date(byAdding: .day, value: 8, to: today), estimatedMinutes: 240,
-            remainingMinutes: 180, progress: 0.25, preferredPeriod: .afternoon
+            remainingMinutes: 180, progress: 0.25, preferredPeriod: .afternoon, planningPeriod: weekPeriod
         )
         var agent = PlanItem(
             kind: .task, title: "Tool Calling 实践", detail: "完成天气工具练习", importance: 4,
             deadline: calendar.date(byAdding: .day, value: 4, to: today), estimatedMinutes: 150,
-            remainingMinutes: 90, progress: 0.4, preferredPeriod: .morning
+            remainingMinutes: 90, progress: 0.4, preferredPeriod: .morning, planningPeriod: weekPeriod
         )
         var finance = PlanItem(
             kind: .task, title: "财报阅读", detail: "学习现金流量表", importance: 2,
             deadline: calendar.date(byAdding: .day, value: 18, to: today), estimatedMinutes: 90,
-            remainingMinutes: 90, progress: 0, preferredPeriod: .evening
+            remainingMinutes: 90, progress: 0, preferredPeriod: .evening, planningPeriod: monthPeriod
         )
-        let aiGoal = PlanItem(kind: .goal, title: "系统学习 AI", detail: "建立能独立做 Agent 产品的能力", importance: 5, estimatedMinutes: 2_400, remainingMinutes: 1_620, progress: 0.32)
-        let mathGoal = PlanItem(kind: .goal, title: "掌握大学微积分", detail: "为 8 天后的考试做好准备", importance: 5, deadline: calculus.deadline, estimatedMinutes: 1_800, remainingMinutes: 720, progress: 0.6)
-        let investingGoal = PlanItem(kind: .goal, title: "理解价值投资", detail: "能独立阅读公司财报", importance: 3, estimatedMinutes: 1_200, remainingMinutes: 930, progress: 0.22)
+        let aiGoal = PlanItem(kind: .goal, title: "系统学习 AI", detail: "建立能独立做 Agent 产品的能力", importance: 5, estimatedMinutes: 2_400, remainingMinutes: 1_620, progress: 0.32, planningPeriod: yearPeriod)
+        let mathGoal = PlanItem(kind: .goal, title: "掌握大学微积分", detail: "为 8 天后的考试做好准备", importance: 5, deadline: calculus.deadline, estimatedMinutes: 1_800, remainingMinutes: 720, progress: 0.6, planningPeriod: yearPeriod)
+        let investingGoal = PlanItem(kind: .goal, title: "理解价值投资", detail: "能独立阅读公司财报", importance: 3, estimatedMinutes: 1_200, remainingMinutes: 930, progress: 0.22, planningPeriod: yearPeriod)
+        let agentMilestone = PlanItem(
+            parentID: aiGoal.id,
+            kind: .milestone,
+            title: "完成 Agent 原型",
+            detail: "让核心对话和计划闭环可连续使用",
+            importance: 5,
+            deadline: calendar.date(byAdding: .day, value: 20, to: today),
+            estimatedMinutes: 600,
+            remainingMinutes: 420,
+            progress: 0.3,
+            planningPeriod: monthPeriod
+        )
 
         calculus.parentID = mathGoal.id
         agent.parentID = aiGoal.id
@@ -47,7 +62,7 @@ enum DemoData {
         ]
 
         return LampSnapshot(
-            planItems: [aiGoal, mathGoal, investingGoal, calculus, agent, finance],
+            planItems: [aiGoal, mathGoal, investingGoal, agentMilestone, calculus, agent, finance],
             blocks: blocks, memories: memories, rules: rules, temporaryStates: []
         )
     }

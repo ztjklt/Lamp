@@ -7,14 +7,21 @@ struct AgentDirective: Decodable {
         var detail: String?
         var estimatedMinutes: Int?
         var deadlineHint: String?
+        var kind: String?
+        var planningScope: String?
+        var periodAnchor: String?
+        var deadline: String?
+        var importance: Int?
         var state: String?
         var note: String?
         var question: String?
 
         enum CodingKeys: String, CodingKey {
-            case title, detail, state, note, question
+            case title, detail, kind, deadline, importance, state, note, question
             case estimatedMinutes = "estimated_minutes"
             case deadlineHint = "deadline_hint"
+            case planningScope = "planning_scope"
+            case periodAnchor = "period_anchor"
         }
     }
 
@@ -29,20 +36,50 @@ enum AgentAPIClient {
     private static let publishableKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inptc2t0eGRva3J1dGhhaW9vb2ZiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MjYyNTQsImV4cCI6MjEwNDEwMjI1NH0.6CQRbDzwjkhmxKBcP8cCeWfDG7jztti4Ca6taLPvAuk"
 
     static func interpret(_ input: String) async throws -> AgentDirective {
-        #if DEBUG
-        let endpoint = URL(string: "http://127.0.0.1:8787/v1/interpret")!
-        var request = URLRequest(url: endpoint, timeoutInterval: 22)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(RequestBody(input: input))
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw ClientError.invalidResponse
+        let token = try await SupabaseAnonymousSession.shared.accessToken()
+        let idempotencyKey = UUID().uuidString
+        let body = AgentRequest(
+            schemaVersion: 1,
+            input: input,
+            idempotencyKey: idempotencyKey,
+            timezone: TimeZone.current.identifier,
+            locale: Locale.current.identifier,
+            referenceDate: ISO8601DateFormatter().string(from: .now)
+        )
+        let encoded = try JSONEncoder().encode(body)
+
+        for attempt in 0..<2 {
+            var request = URLRequest(url: supabaseURL.appending(path: "functions/v1/agent"), timeoutInterval: 35)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.httpBody = encoded
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw ClientError.invalidResponse }
+                if http.statusCode == 200 {
+                    let payload = try JSONDecoder().decode(AgentResponse.self, from: data)
+                    guard let call = payload.call else { throw ClientError.invalidResponse }
+                    return AgentDirective(name: call.name, arguments: call.arguments, model: payload.model ?? "DeepSeek")
+                }
+                if attempt == 0, http.statusCode == 429 || http.statusCode >= 500 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                let payload = try? JSONDecoder().decode(APIErrorPayload.self, from: data)
+                throw ClientError.server(payload?.message ?? payload?.error ?? "Lamp AI 服务暂时不可用")
+            } catch let error as ClientError {
+                throw error
+            } catch {
+                if attempt == 0 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                throw ClientError.network
+            }
         }
-        return try JSONDecoder().decode(AgentDirective.self, from: data)
-        #else
-        throw ClientError.productionEndpointNotConfigured
-        #endif
+        throw ClientError.invalidResponse
     }
 
     static func analyzeScheduleImage(
@@ -100,7 +137,23 @@ enum AgentAPIClient {
         throw ClientError.invalidResponse
     }
 
-    private struct RequestBody: Encodable { var input: String }
+    private struct AgentRequest: Encodable {
+        var schemaVersion: Int
+        var input: String
+        var idempotencyKey: String
+        var timezone: String
+        var locale: String
+        var referenceDate: String
+    }
+
+    private struct AgentResponse: Decodable {
+        struct ToolCall: Decodable {
+            var name: String
+            var arguments: AgentDirective.Arguments
+        }
+        var call: ToolCall?
+        var model: String?
+    }
 
     private struct ImageAnalysisRequest: Encodable {
         struct ImagePayload: Encodable {
@@ -124,14 +177,12 @@ enum AgentAPIClient {
 
     enum ClientError: LocalizedError {
         case invalidResponse
-        case productionEndpointNotConfigured
         case network
         case server(String)
 
         var errorDescription: String? {
             switch self {
             case .invalidResponse: "服务器返回了无法读取的结果"
-            case .productionEndpointNotConfigured: "生产端点尚未配置"
             case .network: "网络连接失败，请稍后重试"
             case let .server(message): message
             }

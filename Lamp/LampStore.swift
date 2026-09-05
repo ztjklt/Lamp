@@ -12,6 +12,7 @@ final class LampStore: ObservableObject {
     @Published var occurrenceOverrides: [ScheduleOccurrenceOverride] = []
     @Published var highlightedBlockIDs: Set<UUID> = []
     @Published var pendingReplan: ReplanProposal?
+    @Published var pendingWeeklySchedule: WeeklyScheduleProposal?
     @Published var toast: String?
     @Published var undoTransaction: LampUndoTransaction?
     @Published var hasCompletedOnboarding: Bool
@@ -53,12 +54,69 @@ final class LampStore: ObservableObject {
     }
 
     var weeklyFocusMinutes: Int {
-        let interval = calendar.dateInterval(of: .weekOfYear, for: .now)
-        guard let interval else { return 0 }
-        return (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: interval.start) }
-            .flatMap { blocks(on: $0) }
-            .filter { $0.kind == .focus && $0.state != .missed }
-            .reduce(0) { $0 + $1.durationMinutes }
+        scheduleSummary(for: .week, containing: .now).focusMinutes
+    }
+
+    func periodInterval(for timeframe: PlanTimeframe, containing date: Date) -> DateInterval {
+        let result: DateInterval? = switch timeframe {
+        case .week:
+            calendar.dateInterval(of: .weekOfYear, for: date)
+        case .month:
+            calendar.dateInterval(of: .month, for: date)
+        case .year:
+            calendar.dateInterval(of: .year, for: date)
+        }
+        return result ?? DateInterval(start: calendar.startOfDay(for: date), duration: 86_400)
+    }
+
+    func normalizedPeriod(_ timeframe: PlanTimeframe, containing date: Date) -> PlanningPeriod {
+        PlanningPeriod(timeframe: timeframe, anchorDate: periodInterval(for: timeframe, containing: date).start)
+    }
+
+    func planItems(for timeframe: PlanTimeframe, containing date: Date) -> [PlanItem] {
+        let interval = periodInterval(for: timeframe, containing: date)
+        return planItems.filter { item in
+            if let period = item.planningPeriod {
+                return period.timeframe == timeframe &&
+                    calendar.isDate(periodInterval(for: timeframe, containing: period.anchorDate).start,
+                                    inSameDayAs: interval.start)
+            }
+            return item.deadline.map(interval.contains) ?? false
+        }
+        .sorted(by: planItemSort)
+    }
+
+    func planItems(in interval: DateInterval) -> [PlanItem] {
+        planItems.filter { item in
+            if let period = item.planningPeriod {
+                return interval.contains(period.anchorDate)
+            }
+            return item.deadline.map(interval.contains) ?? false
+        }
+        .sorted(by: planItemSort)
+    }
+
+    func unassignedGoals() -> [PlanItem] {
+        planItems
+            .filter { $0.kind == .goal && $0.planningPeriod == nil && $0.deadline == nil }
+            .sorted(by: planItemSort)
+    }
+
+    func scheduleSummary(for timeframe: PlanTimeframe, containing date: Date) -> SchedulePeriodSummary {
+        let interval = periodInterval(for: timeframe, containing: date)
+        let periodBlocks = expandedBlocks(in: interval)
+        var byDay: [Date: Int] = [:]
+        for block in periodBlocks where block.kind == .focus && block.state != .missed {
+            byDay[calendar.startOfDay(for: block.start), default: 0] += block.durationMinutes
+        }
+        return SchedulePeriodSummary(
+            totalMinutes: periodBlocks.filter { $0.state != .missed }.reduce(0) { $0 + $1.durationMinutes },
+            focusMinutes: periodBlocks.filter { $0.kind == .focus && $0.state != .missed }.reduce(0) { $0 + $1.durationMinutes },
+            completedMinutes: periodBlocks.filter { $0.kind == .focus && $0.state == .completed }.reduce(0) { $0 + $1.durationMinutes },
+            fixedEventCount: periodBlocks.filter { $0.kind == .fixed }.count,
+            blockCount: periodBlocks.count,
+            focusMinutesByDay: byDay
+        )
     }
 
     func blocks(on date: Date) -> [ScheduleBlock] {
@@ -273,6 +331,172 @@ final class LampStore: ObservableObject {
         save()
     }
 
+    @discardableResult
+    func createPlanItem(
+        title: String,
+        detail: String,
+        importance: Int,
+        timeframe: PlanTimeframe,
+        anchorDate: Date,
+        deadline: Date?,
+        estimatedMinutes: Int,
+        parentID: UUID? = nil
+    ) -> PlanItem {
+        beginTransaction("已撤销新增计划")
+        let kind: PlanKind = switch timeframe {
+        case .week: .task
+        case .month: .milestone
+        case .year: .goal
+        }
+        let item = PlanItem(
+            parentID: parentID,
+            kind: kind,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+            detail: detail,
+            importance: min(5, max(1, importance)),
+            deadline: deadline,
+            estimatedMinutes: max(20, estimatedMinutes),
+            isSplittable: timeframe == .week,
+            planningPeriod: normalizedPeriod(timeframe, containing: anchorDate)
+        )
+        planItems.append(item)
+        toast = timeframe == .year ? "年度目标已加入路线" : "\(timeframe.title)计划已创建"
+        save()
+        return item
+    }
+
+    func updatePlanItem(
+        _ item: PlanItem,
+        title: String,
+        detail: String,
+        importance: Int,
+        timeframe: PlanTimeframe,
+        anchorDate: Date,
+        deadline: Date?,
+        estimatedMinutes: Int,
+        parentID: UUID?
+    ) {
+        guard let index = planItems.firstIndex(where: { $0.id == item.id }) else { return }
+        beginTransaction("已撤销计划修改")
+        planItems[index].title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        planItems[index].detail = detail
+        planItems[index].importance = min(5, max(1, importance))
+        planItems[index].deadline = deadline
+        let newEstimate = max(20, estimatedMinutes)
+        let alreadyCompleted = max(0, planItems[index].estimatedMinutes - planItems[index].remainingMinutes)
+        planItems[index].estimatedMinutes = newEstimate
+        planItems[index].remainingMinutes = max(0, newEstimate - alreadyCompleted)
+        planItems[index].progress = min(1, max(0, 1 - Double(planItems[index].remainingMinutes) / Double(newEstimate)))
+        planItems[index].parentID = parentID
+        planItems[index].planningPeriod = normalizedPeriod(timeframe, containing: anchorDate)
+        planItems[index].kind = switch timeframe {
+        case .week: .task
+        case .month: .milestone
+        case .year: .goal
+        }
+        for blockIndex in blocks.indices where blocks[blockIndex].planItemID == item.id {
+            blocks[blockIndex].title = planItems[index].title
+        }
+        toast = "计划已更新"
+        save()
+    }
+
+    @discardableResult
+    func proposeWeeklyPlan(
+        title: String,
+        detail: String,
+        importance: Int,
+        weekContaining anchorDate: Date,
+        deadline: Date?,
+        estimatedMinutes: Int,
+        parentID: UUID? = nil
+    ) -> WeeklyScheduleProposal {
+        let week = periodInterval(for: .week, containing: anchorDate)
+        let item = PlanItem(
+            parentID: parentID,
+            kind: .task,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+            detail: detail,
+            importance: min(5, max(1, importance)),
+            deadline: deadline,
+            estimatedMinutes: max(20, estimatedMinutes),
+            isSplittable: true,
+            planningPeriod: PlanningPeriod(timeframe: .week, anchorDate: week.start)
+        )
+        let occupied = expandedBlocks(in: week)
+        let horizonStart = week.contains(.now) ? max(Date.now, week.start) : week.start
+        let generated = PlanningEngine(calendar: calendar).makeSchedule(
+            items: [item],
+            fixed: occupied,
+            context: PlanningContext(horizonStart: horizonStart, horizonEnd: week.end)
+        )
+        let suggestions = generated.filter { $0.planItemID == item.id }
+        let warnings = suggestions.isEmpty ? ["本周没有找到无冲突空档，请手动选择时间。"] : []
+        let fallbackStart = fallbackWeeklyStart(in: week)
+        let fallback = ScheduleBlock(
+            planItemID: item.id,
+            title: item.title,
+            start: fallbackStart,
+            end: fallbackStart.addingTimeInterval(TimeInterval(min(90, item.estimatedMinutes) * 60)),
+            kind: .focus,
+            reason: "手动选择本周时间"
+        )
+        let proposal = WeeklyScheduleProposal(
+            item: item,
+            weekStart: week.start,
+            suggestedBlocks: suggestions.isEmpty ? [fallback] : suggestions,
+            warnings: warnings
+        )
+        pendingWeeklySchedule = proposal
+        return proposal
+    }
+
+    func weeklyScheduleIssue(for block: ScheduleBlock, proposalBlocks: [ScheduleBlock]) -> String? {
+        guard block.end > block.start else { return "结束时间需要晚于开始时间" }
+        guard let proposal = pendingWeeklySchedule else { return "排程预览已失效" }
+        let week = periodInterval(for: .week, containing: proposal.weekStart)
+        guard block.start >= week.start, block.end <= week.end else { return "时段需要位于所选周内" }
+        let interval = DateInterval(start: block.start, end: block.end)
+        if expandedBlocks(in: week).contains(where: {
+            interval.intersects(DateInterval(start: $0.start, end: $0.end))
+        }) {
+            return "与已有日程冲突"
+        }
+        if proposalBlocks.contains(where: {
+            $0.id != block.id && interval.intersects(DateInterval(start: $0.start, end: $0.end))
+        }) {
+            return "与另一个候选时段重叠"
+        }
+        return nil
+    }
+
+    @discardableResult
+    func applyWeeklyScheduleProposal(blocks proposedBlocks: [ScheduleBlock]) -> Bool {
+        guard let proposal = pendingWeeklySchedule,
+              !proposedBlocks.isEmpty,
+              proposedBlocks.allSatisfy({ weeklyScheduleIssue(for: $0, proposalBlocks: proposedBlocks) == nil }) else {
+            toast = "请先解决排程冲突"
+            return false
+        }
+        beginTransaction("已撤销周计划排程")
+        planItems.append(proposal.item)
+        blocks.append(contentsOf: proposedBlocks.map { block in
+            var inserted = block
+            inserted.planItemID = proposal.item.id
+            inserted.title = proposal.item.title
+            return inserted
+        })
+        pendingWeeklySchedule = nil
+        toast = "周计划已排入时间线"
+        save()
+        return true
+    }
+
+    func dismissWeeklyScheduleProposal() {
+        pendingWeeklySchedule = nil
+        toast = "未保存这项周计划"
+    }
+
     func updateMemory(_ memory: MemoryFact, title: String, detail: String) {
         beginTransaction("已撤销记忆修改")
         guard let index = memories.firstIndex(where: { $0.id == memory.id }) else { return }
@@ -389,6 +613,18 @@ final class LampStore: ObservableObject {
             return "知道了。我把今天的强度降下来，并保留了更多恢复时间。先看看调整方案。"
         }
 
+        if let scope = inferredPlanningScope(from: normalized) {
+            return createPlanFromConversation(
+                title: inferredTitle(from: normalized),
+                detail: normalized,
+                scope: scope,
+                anchorDate: .now,
+                deadline: normalized.contains("明天") ? calendar.date(byAdding: .day, value: 1, to: .now) : nil,
+                estimatedMinutes: 60,
+                importance: scope == .week ? 4 : 5
+            )
+        }
+
         beginTransaction("已撤销新增事项")
         let title = inferredTitle(from: normalized)
         let deadline = normalized.contains("明天") ? calendar.date(byAdding: .day, value: 1, to: .now) : nil
@@ -414,15 +650,26 @@ final class LampStore: ObservableObject {
         case "ask_clarification":
             return directive.arguments.question ?? "这件事最晚需要在什么时候完成？"
         case "create_item":
-            beginTransaction("已撤销新增事项")
             let title = directive.arguments.title ?? inferredTitle(from: input)
             let minutes = min(480, max(20, directive.arguments.estimatedMinutes ?? 60))
+            if let scope = planningScope(from: directive, fallbackInput: input) {
+                return createPlanFromConversation(
+                    title: title,
+                    detail: directive.arguments.detail ?? input,
+                    scope: scope,
+                    anchorDate: parsedDate(directive.arguments.periodAnchor) ?? .now,
+                    deadline: parsedDate(directive.arguments.deadline ?? directive.arguments.deadlineHint),
+                    estimatedMinutes: minutes,
+                    importance: directive.arguments.importance ?? (scope == .week ? 4 : 5)
+                )
+            }
+            beginTransaction("已撤销新增事项")
             let item = PlanItem(
                 kind: .task,
                 title: title,
                 detail: directive.arguments.detail ?? input,
-                importance: directive.arguments.deadlineHint == nil ? 3 : 5,
-                deadline: directive.arguments.deadlineHint == nil ? nil : calendar.date(byAdding: .day, value: 1, to: .now),
+                importance: directive.arguments.importance ?? (directive.arguments.deadlineHint == nil ? 3 : 5),
+                deadline: parsedDate(directive.arguments.deadline ?? directive.arguments.deadlineHint),
                 estimatedMinutes: minutes
             )
             planItems.append(item)
@@ -513,6 +760,7 @@ final class LampStore: ObservableObject {
         occurrenceOverrides = []
         highlightedBlockIDs = []
         pendingReplan = nil
+        pendingWeeklySchedule = nil
         undoTransaction = nil
         onboardingProfile = nil
         hasCompletedOnboarding = false
@@ -573,6 +821,81 @@ final class LampStore: ObservableObject {
         return String(cleaned.prefix(22)).trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
     }
 
+    private func inferredPlanningScope(from input: String) -> PlanTimeframe? {
+        if input.contains("本周") || input.contains("这周") || input.localizedCaseInsensitiveContains("this week") { return .week }
+        if input.contains("本月") || input.contains("这个月") || input.localizedCaseInsensitiveContains("this month") { return .month }
+        if input.contains("今年") || input.contains("本年度") || input.localizedCaseInsensitiveContains("this year") { return .year }
+        return nil
+    }
+
+    private func planningScope(from directive: AgentDirective, fallbackInput: String) -> PlanTimeframe? {
+        if let raw = directive.arguments.planningScope?.lowercased(), let scope = PlanTimeframe(rawValue: raw) {
+            return scope
+        }
+        switch directive.arguments.kind?.lowercased() {
+        case "goal": return .year
+        case "milestone", "project": return .month
+        default: return inferredPlanningScope(from: fallbackInput)
+        }
+    }
+
+    private func parsedDate(_ value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        if value == "tomorrow" || value == "明天" { return calendar.date(byAdding: .day, value: 1, to: .now) }
+        if let date = ISO8601DateFormatter().date(from: value) { return date }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: value)
+    }
+
+    private func createPlanFromConversation(
+        title: String,
+        detail: String,
+        scope: PlanTimeframe,
+        anchorDate: Date,
+        deadline: Date?,
+        estimatedMinutes: Int,
+        importance: Int
+    ) -> String {
+        switch scope {
+        case .week:
+            proposeWeeklyPlan(
+                title: title,
+                detail: detail,
+                importance: importance,
+                weekContaining: anchorDate,
+                deadline: deadline,
+                estimatedMinutes: estimatedMinutes
+            )
+            return "已为“\(title)”生成本周候选时段，请确认后再写入时间线。"
+        case .month:
+            createPlanItem(
+                title: title,
+                detail: detail,
+                importance: importance,
+                timeframe: .month,
+                anchorDate: anchorDate,
+                deadline: deadline,
+                estimatedMinutes: estimatedMinutes
+            )
+            return "已把“\(title)”加入本月里程碑。"
+        case .year:
+            createPlanItem(
+                title: title,
+                detail: detail,
+                importance: importance,
+                timeframe: .year,
+                anchorDate: anchorDate,
+                deadline: deadline,
+                estimatedMinutes: estimatedMinutes
+            )
+            return "已把“\(title)”加入年度目标，并同步到路线。"
+        }
+    }
+
     private func addToNextAvailableSlot(_ item: PlanItem) {
         let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now))!
         let context = PlanningContext(
@@ -602,6 +925,7 @@ final class LampStore: ObservableObject {
         temporaryStates = snapshot.temporaryStates
         recurringSchedules = snapshot.recurringSchedules
         occurrenceOverrides = snapshot.occurrenceOverrides
+        pendingWeeklySchedule = nil
     }
 
     private func makeSnapshot() -> LampSnapshot {
@@ -648,5 +972,43 @@ final class LampStore: ObservableObject {
             if rule.weekdays.contains(calendar.component(.weekday, from: day)) { return day }
         }
         return nil
+    }
+
+    private func expandedBlocks(in interval: DateInterval) -> [ScheduleBlock] {
+        var result: [ScheduleBlock] = []
+        var day = calendar.startOfDay(for: interval.start)
+        while day < interval.end {
+            result.append(contentsOf: blocks(on: day).filter { $0.start < interval.end && $0.end > interval.start })
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        return Dictionary(grouping: result, by: \.id)
+            .compactMap { $0.value.first }
+            .sorted { $0.start < $1.start }
+    }
+
+    private func fallbackWeeklyStart(in week: DateInterval) -> Date {
+        var day = week.contains(.now) ? calendar.startOfDay(for: .now) : week.start
+        var candidate = calendar.date(on: day, hour: 9)
+        if candidate < .now, week.contains(.now) {
+            let minutes = calendar.component(.minute, from: .now)
+            let rounded = calendar.date(byAdding: .minute, value: 30 - minutes % 30, to: .now) ?? .now
+            candidate = rounded
+        }
+        if candidate >= week.end {
+            day = week.start
+            candidate = calendar.date(on: day, hour: 9)
+        }
+        return candidate
+    }
+
+    private func planItemSort(_ lhs: PlanItem, _ rhs: PlanItem) -> Bool {
+        if lhs.importance != rhs.importance { return lhs.importance > rhs.importance }
+        switch (lhs.deadline, rhs.deadline) {
+        case let (left?, right?): return left < right
+        case (_?, nil): return true
+        case (nil, _?): return false
+        case (nil, nil): return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
     }
 }

@@ -3,7 +3,7 @@ import UIKit
 
 enum LampDestination: String, CaseIterable, Hashable {
     case today = "今天"
-    case week = "本周"
+    case week = "日程"
     case tell = "Lamp"
     case roadmap = "路线"
     case profile = "我的"
@@ -28,6 +28,7 @@ enum PresentedFlow: Identifiable, Equatable {
     case missed(ScheduleBlock)
     case privacy
     case replan
+    case weeklySchedulePreview
 
     var id: String {
         switch self {
@@ -37,6 +38,7 @@ enum PresentedFlow: Identifiable, Equatable {
         case let .missed(block): "missed-\(block.id)"
         case .privacy: "privacy"
         case .replan: "replan"
+        case .weeklySchedulePreview: "weekly-schedule-preview"
         }
     }
 }
@@ -80,7 +82,7 @@ struct AppShell: View {
                 .tabItem { Label(LampDestination.today.rawValue, systemImage: LampDestination.today.icon) }
                 .accessibilityIdentifier(LampDestination.today.accessibilityID)
 
-            WeekView()
+            ScheduleView()
                 .tag(LampDestination.week)
                 .tabItem { Label(LampDestination.week.rawValue, systemImage: LampDestination.week.icon) }
                 .accessibilityIdentifier(LampDestination.week.accessibilityID)
@@ -152,18 +154,15 @@ struct AppShell: View {
         }
         .onChange(of: store.pendingReplan?.id) { _, id in
             guard id != nil else { return }
-            if router.presentedFlow == nil {
-                router.show(.replan)
-            }
+            presentPendingFlow(after: .milliseconds(150))
+        }
+        .onChange(of: store.pendingWeeklySchedule?.id) { _, id in
+            guard id != nil else { return }
+            presentPendingFlow(after: .milliseconds(300))
         }
         .onChange(of: router.presentedFlow) { _, flow in
-            guard flow == nil, store.pendingReplan != nil else { return }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(250))
-                if router.presentedFlow == nil, store.pendingReplan != nil {
-                    router.show(.replan)
-                }
-            }
+            guard flow == nil else { return }
+            presentPendingFlow(after: .milliseconds(250))
         }
     }
 
@@ -195,6 +194,20 @@ struct AppShell: View {
             PrivacyDataView()
         case .replan:
             ReplanView()
+        case .weeklySchedulePreview:
+            WeeklySchedulePreviewView()
+        }
+    }
+
+    private func presentPendingFlow(after delay: Duration) {
+        Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            guard router.presentedFlow == nil else { return }
+            if store.pendingReplan != nil {
+                router.show(.replan)
+            } else if store.pendingWeeklySchedule != nil {
+                router.show(.weeklySchedulePreview)
+            }
         }
     }
 

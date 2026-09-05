@@ -2,15 +2,15 @@
 
 Lamp 是一个原生 SwiftUI iPhone 个人规划 Agent。它的核心不是聊天，而是持续回答：**我现在应该做什么？**
 
-当前仓库包含一个可直接运行的产品原型、确定性排程核心、Live Activity / Dynamic Island 扩展、App Shortcuts，以及已接通的 Supabase + DeepSeek 安全图片日程链路。
+当前仓库包含一个可直接运行的产品原型、确定性排程核心、Live Activity / Dynamic Island 扩展、App Shortcuts，以及已接通的 Supabase + DeepSeek 文字与图片日程链路。
 
 ## 已实现
 
 - 三步低摩擦 onboarding。
 - Now + Today 主界面与固定/灵活/休息时间线。
 - 完成、部分完成、未完成反馈和剩余时长更新。
-- Today / Week / Roadmap 三个规划尺度。
-- 四个主页面上方统一显示琥珀色玻璃“和 Lamp 对话”入口。
+- “日程”提供周／月／年三个时间层级，支持周期导航、长期目标、月度里程碑和周排程预览。
+- 原生五栏底部导航，中央 Lamp 图标使用琥珀色突出且不遮挡内容。
 - Tell Lamp：文字、中文语音转写、DeepSeek Vision 图片日程理解与本机 OCR 降级预览。
 - 图片候选可编辑、筛选并检查冲突，确认后一次性导入 Today / Week，整次操作可撤销。
 - 每周重复日程、稳定 occurrence ID 与只影响单次的完成、跳过、改期 override。
@@ -19,7 +19,7 @@ Lamp 是一个原生 SwiftUI iPhone 个人规划 Agent。它的核心不是聊�
 - 本地 JSON 离线持久化与演示数据。
 - Live Activity / Dynamic Island 的倒计时、完成和部分完成控制。
 - “打开今天”“告诉 Lamp”App Shortcuts。
-- 混合排程引擎与 16 个确定性核心测试。
+- 混合排程引擎、18 个确定性核心测试与 12 条全流程 UI 自动化测试。
 - Supabase 匿名认证、Postgres/RLS 数据模型和 DeepSeek 工具白名单、风险分类、幂等审计边界。
 
 ## 运行
@@ -50,15 +50,9 @@ swift test
 
 DeepSeek 永远不获得数据库连接。图片会在本机统一方向、缩放、压缩并临时发送，不写入 Storage；服务端只审计用户、模型、图片哈希、候选数量、耗时和结果状态。
 
-## 本机 DeepSeek 联调
+## DeepSeek 联调
 
-当前开发机的 DeepSeek Key 已保存在 macOS Keychain 的 `com.lamp.deepseek` 条目中，不会进入仓库或 App 二进制。启动安全开发代理：
-
-```bash
-node server/local-agent-proxy.mjs
-```
-
-Debug 版 App 会调用 `http://127.0.0.1:8787/v1/interpret`。代理只绑定本机回环地址、从 Keychain 读取凭证，并只接受 `create_item`、`set_temporary_state`、`ask_clarification` 三种白名单模型输出。代理未启动或调用失败时，App 自动使用离线规则。
+文字和图片请求都通过 Supabase 匿名会话调用独立 Edge Function。App 不包含 DeepSeek 私钥；文字接口仅接受白名单工具和周／月／年结构化计划字段，客户端仍负责最终本地写入。网络失败时，文字输入会回退到本机规则，图片保留本机 OCR 只读预览。
 
 ## 仍需真机/生产环境完成
 
