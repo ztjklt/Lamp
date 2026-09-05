@@ -23,19 +23,26 @@ final class LampUITests: XCTestCase {
         launch()
         let tellLamp = app.descendants(matching: .any)["global.tellLamp"]
         XCTAssertTrue(tellLamp.waitForExistence(timeout: 3))
-        app.tabBars.buttons["本周"].tap()
-        XCTAssertTrue(app.staticTexts["本周"].waitForExistence(timeout: 2))
-        XCTAssertTrue(tellLamp.exists)
-        app.tabBars.buttons["路线"].tap()
-        XCTAssertTrue(app.staticTexts["路线"].waitForExistence(timeout: 2))
-        XCTAssertTrue(tellLamp.exists)
-        app.tabBars.buttons["我的"].tap()
-        XCTAssertTrue(app.staticTexts["Lamp 了解的你"].waitForExistence(timeout: 2))
-        XCTAssertTrue(tellLamp.exists)
-        tellLamp.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.input"].waitForExistence(timeout: 2))
-        app.buttons["tellLamp.done"].tap()
-        XCTAssertFalse(app.descendants(matching: .any)["tellLamp.input"].exists)
+        XCTAssertEqual(tellLamp.label, "和 Lamp 对话")
+        XCTAssertTrue(app.tabBars.firstMatch.frame.contains(tellLamp.frame))
+
+        let destinations = [
+            (tab: "今天", marker: "today.now.details"),
+            (tab: "本周", marker: "本周"),
+            (tab: "路线", marker: "路线"),
+            (tab: "我的", marker: "Lamp 了解的你")
+        ]
+
+        for destination in destinations {
+            app.tabBars.buttons[destination.tab].tap()
+            XCTAssertTrue(app.descendants(matching: .any)[destination.marker].waitForExistence(timeout: 2))
+            XCTAssertTrue(tellLamp.exists)
+
+            tellLamp.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["tellLamp.input"].waitForExistence(timeout: 2))
+            app.buttons["tellLamp.done"].tap()
+            XCTAssertTrue(app.descendants(matching: .any)[destination.marker].waitForExistence(timeout: 2))
+        }
     }
 
     func testTodayDetailPartialMissedAndUndoActions() {

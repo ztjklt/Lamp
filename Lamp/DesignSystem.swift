@@ -8,7 +8,8 @@ enum LampTheme {
     static let card = Color(uiColor: .secondarySystemGroupedBackground)
     static let ink = Color.primary
     static let muted = Color.secondary
-    static let amber = Color(red: 0.96, green: 0.53, blue: 0.12)
+    static let amberUIColor = UIColor(red: 0.96, green: 0.53, blue: 0.12, alpha: 1)
+    static let amber = Color(uiColor: amberUIColor)
     static let amberSoft = Color(red: 1.0, green: 0.77, blue: 0.34)
     static let sage = Color(red: 0.32, green: 0.58, blue: 0.39)
     static let danger = Color(uiColor: .systemRed)

@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 
 enum LampDestination: String, CaseIterable, Hashable {
     case today = "今天"
     case week = "本周"
+    case tell = "Lamp"
     case roadmap = "路线"
     case profile = "我的"
 
@@ -10,6 +12,7 @@ enum LampDestination: String, CaseIterable, Hashable {
         switch self {
         case .today: "sparkles"
         case .week: "calendar"
+        case .tell: "waveform.circle.fill"
         case .roadmap: "point.topleft.down.curvedto.point.bottomright.up"
         case .profile: "person.crop.circle"
         }
@@ -82,6 +85,21 @@ struct AppShell: View {
                 .tabItem { Label(LampDestination.week.rawValue, systemImage: LampDestination.week.icon) }
                 .accessibilityIdentifier(LampDestination.week.accessibilityID)
 
+            Color.clear
+                .tag(LampDestination.tell)
+                .tabItem {
+                    Label {
+                        Text(LampDestination.tell.rawValue)
+                    } icon: {
+                        Image(uiImage: LampTabIcon.image)
+                            .accessibilityIdentifier("global.tellLamp")
+                    }
+                    .accessibilityLabel("和 Lamp 对话")
+                    .accessibilityHint("打开文字、语音和图片日程输入")
+                    .accessibilityIdentifier("global.tellLamp")
+                }
+                .accessibilityIdentifier("global.tellLamp")
+
             RoadmapView()
                 .tag(LampDestination.roadmap)
                 .tabItem { Label(LampDestination.roadmap.rawValue, systemImage: LampDestination.roadmap.icon) }
@@ -93,12 +111,6 @@ struct AppShell: View {
                 .accessibilityIdentifier(LampDestination.profile.accessibilityID)
         }
         .tint(LampTheme.amber)
-        .overlay(alignment: .bottom) {
-            GlobalTellLampButton {
-                router.show(.tellLamp)
-            }
-            .padding(.bottom, 58)
-        }
         .sheet(item: $router.presentedFlow) { flow in
             presentedView(for: flow)
         }
@@ -155,7 +167,18 @@ struct AppShell: View {
         }
     }
 
-    private var destinationBinding: Binding<LampDestination> { $router.destination }
+    private var destinationBinding: Binding<LampDestination> {
+        Binding(
+            get: { router.destination },
+            set: { newValue in
+                if newValue == .tell {
+                    router.show(.tellLamp)
+                } else {
+                    router.destination = newValue
+                }
+            }
+        )
+    }
 
     @ViewBuilder
     private func presentedView(for flow: PresentedFlow) -> some View {
@@ -199,57 +222,13 @@ struct AppShell: View {
     }
 }
 
-private struct GlobalTellLampButton: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var glowing = false
-    var action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 18, weight: .bold))
-                    .symbolEffect(.variableColor.iterative, isActive: !reduceMotion && glowing)
-                Text("和 Lamp 对话")
-                    .font(.headline.weight(.bold))
-            }
-            .foregroundStyle(.white)
-            .frame(minWidth: 174, minHeight: 58)
-            .padding(.horizontal, 18)
-            .background(
-                LinearGradient(
-                    colors: [
-                        LampTheme.amberSoft.opacity(0.88),
-                        LampTheme.amber.opacity(0.90),
-                        Color(red: 0.91, green: 0.36, blue: 0.08).opacity(0.92)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: Capsule()
-            )
-            .overlay(Capsule().stroke(.white.opacity(0.48), lineWidth: 1))
-            .lampGlass(.prominent, cornerRadius: 30)
-            .shadow(color: LampTheme.amber.opacity(glowing ? 0.46 : 0.25), radius: glowing ? 24 : 14, y: 8)
-            .scaleEffect(!reduceMotion && glowing ? 1.018 : 1)
-        }
-        .buttonStyle(GlobalLampPressStyle())
-        .accessibilityIdentifier("global.tellLamp")
-        .accessibilityHint("打开文字、语音和图片日程输入")
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
-                glowing = true
-            }
-        }
-    }
-}
-
-private struct GlobalLampPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .opacity(configuration.isPressed ? 0.88 : 1)
-            .animation(.snappy(duration: 0.18), value: configuration.isPressed)
-    }
+private enum LampTabIcon {
+    static let image: UIImage = {
+        let configuration = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let symbol = UIImage(
+            systemName: LampDestination.tell.icon,
+            withConfiguration: configuration
+        ) ?? UIImage()
+        return symbol.withTintColor(LampTheme.amberUIColor, renderingMode: .alwaysOriginal)
+    }()
 }
