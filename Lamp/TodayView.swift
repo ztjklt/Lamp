@@ -150,7 +150,7 @@ struct TodayView: View {
                                     .font(.body.weight(.semibold))
                                     .strikethrough(block.state == .completed)
                                     .foregroundStyle(LampTheme.ink)
-                                Text("\(block.durationMinutes) 分钟 · \(block.provenance)")
+                                Text("\(block.displayTime) · \(block.provenance)")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()

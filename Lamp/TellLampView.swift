@@ -527,7 +527,13 @@ struct TellLampView: View {
         phase = .sending
         response = nil
         Task {
-            response = await store.processWithAgent(input: input)
+            do {
+                response = try await store.processWithAgent(input: input)
+            } catch {
+                response = "发送失败，请重试。你的输入已保留。"
+                phase = .failed
+                return
+            }
             phase = .answered
             text = ""
             if store.pendingReplan != nil || store.pendingWeeklySchedule != nil { dismiss() }

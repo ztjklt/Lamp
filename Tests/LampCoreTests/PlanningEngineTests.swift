@@ -4,10 +4,56 @@ import Testing
 
 @Suite("Planning Engine deterministic fixtures")
 struct PlanningEngineTests {
+    @Test("midnight sleep belongs to preceding evening and repeats with stable IDs")
+    func nightlySleep() throws {
+        var rule = RecurringScheduleRule(title: "睡眠", detail: "", startsOn: day, weekdays: Array(1...7), startMinute: 0, durationMinutes: 480, timezone: "UTC")
+        rule.isSleep = true
+        rule.startDayOffset = 1
+        let first = try #require(RecurringScheduleEngine.occurrence(for: rule, on: day, calendar: calendar))
+        #expect(first.start == calendar.date(byAdding: .day, value: 1, to: day))
+        #expect(first.durationMinutes == 480)
+        #expect(first.occurrenceDate == day)
+        #expect(first.isSleep == true)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: day)!
+        let next = try #require(RecurringScheduleEngine.occurrence(for: rule, on: tomorrow, calendar: calendar))
+        #expect(first.id != next.id)
+        let restored = try JSONDecoder().decode(RecurringScheduleRule.self, from: JSONEncoder().encode(rule))
+        #expect(restored.startDayOffset == 1)
+        let cancelled = ScheduleOccurrenceOverride(recurringRuleID: rule.id, occurrenceDate: day, state: .missed, isCancelled: true)
+        #expect(RecurringScheduleEngine.occurrence(for: rule, on: day, override: cancelled, calendar: calendar) == nil)
+        rule.startMinute = 1380
+        rule.startDayOffset = 0
+        rule.durationMinutes = 540
+        let crossMidnight = try #require(RecurringScheduleEngine.occurrence(for: rule, on: day, calendar: calendar))
+        #expect(crossMidnight.end == calendar.date(on: tomorrow, hour: 8))
+    }
     private var calendar: Calendar {
         var value = Calendar(identifier: .gregorian)
         value.timeZone = TimeZone(secondsFromGMT: 0)!
         return value
+    }
+
+    @Test("sleep survives year boundaries and respects local wake time through daylight saving")
+    func sleepCalendarBoundaries() throws {
+        var local = Calendar(identifier: .gregorian)
+        local.timeZone = TimeZone(identifier: "America/New_York")!
+        let evening = local.date(from: DateComponents(year: 2026, month: 3, day: 7))!
+        var rule = RecurringScheduleRule(title: "睡眠", detail: "", startsOn: evening, weekdays: Array(1...7), startMinute: 1380, durationMinutes: 540, timezone: local.timeZone.identifier)
+        rule.isSleep = true
+        rule.sleepEndMinute = 480
+        let occurrence = try #require(RecurringScheduleEngine.occurrence(for: rule, on: evening, calendar: local))
+        #expect(local.component(.hour, from: occurrence.end) == 8)
+        #expect(occurrence.durationMinutes == 480)
+        let yearEnd = local.date(from: DateComponents(year: 2026, month: 12, day: 31))!
+        let newYearSleep = try #require(RecurringScheduleEngine.occurrence(for: rule, on: yearEnd, calendar: local))
+        #expect(local.component(.year, from: newYearSleep.end) == 2027)
+        #expect(RecurringScheduleEngine.occurrence(for: rule, on: local.date(byAdding: .day, value: -1, to: evening)!, calendar: local) == nil)
+        var payload = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(rule)) as? [String: Any])
+        payload.removeValue(forKey: "isSleep")
+        payload.removeValue(forKey: "sleepEndMinute")
+        let legacy = try JSONDecoder().decode(RecurringScheduleRule.self, from: JSONSerialization.data(withJSONObject: payload))
+        #expect(legacy.isSleep == nil)
+        #expect(legacy.startDayOffset == nil)
     }
 
     private var day: Date { Date(timeIntervalSince1970: 1_767_225_600) }

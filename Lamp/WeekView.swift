@@ -135,7 +135,7 @@ struct ScheduleView: View {
                         RoundedRectangle(cornerRadius: 2).fill(block.kind.color).frame(width: 4, height: 48)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(block.title).font(.body.weight(.semibold)).foregroundStyle(LampTheme.ink)
-                            Text("\(block.start.formatted(date: .omitted, time: .shortened))–\(block.end.formatted(date: .omitted, time: .shortened))")
+                            Text(block.displayTime)
                                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         }
                         Spacer()

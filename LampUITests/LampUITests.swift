@@ -1,6 +1,20 @@
 import XCTest
 
 final class LampUITests: XCTestCase {
+    func testNightlySleepAppearsInToday() {
+        launch(extraArguments: ["-mock-sleep-directive"])
+        app.descendants(matching: .any)["global.tellLamp"].tap()
+        let input = app.descendants(matching: .any)["tellLamp.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 3))
+        input.tap()
+        input.typeText("每天晚上零点到早上八点睡觉")
+        app.buttons["tellLamp.send"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tellLamp.response"].waitForExistence(timeout: 5))
+        app.buttons["tellLamp.done"].tap()
+        for _ in 0..<5 where !app.staticTexts["睡眠"].isHittable { app.swipeUp() }
+        XCTAssertTrue(app.staticTexts["睡眠"].exists)
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "次日")).firstMatch.exists)
+    }
     private var app: XCUIApplication!
 
     override func setUpWithError() throws {

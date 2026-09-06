@@ -21,6 +21,7 @@ final class LampStore: ObservableObject {
     private let calendar: Calendar
     private let persistenceURL: URL
     private let profileKey = "lamp.onboarding.profile"
+    private var clarificationInput: String?
 
     init(calendar: Calendar = .current) {
         self.calendar = calendar
@@ -122,7 +123,7 @@ final class LampStore: ObservableObject {
             byDay[calendar.startOfDay(for: block.start), default: 0] += block.durationMinutes
         }
         return SchedulePeriodSummary(
-            totalMinutes: periodBlocks.filter { $0.state != .missed }.reduce(0) { $0 + $1.durationMinutes },
+            totalMinutes: periodBlocks.filter { $0.state != .missed }.reduce(0) { $0 + max(0, Int(min($1.end, interval.end).timeIntervalSince(max($1.start, interval.start)) / 60)) },
             focusMinutes: periodBlocks.filter { $0.kind == .focus && $0.state != .missed }.reduce(0) { $0 + $1.durationMinutes },
             completedMinutes: periodBlocks.filter { $0.kind == .focus && $0.state == .completed }.reduce(0) { $0 + $1.durationMinutes },
             fixedEventCount: periodBlocks.filter { $0.kind == .fixed }.count,
@@ -143,7 +144,7 @@ final class LampStore: ObservableObject {
                 override: occurrenceOverride,
                 calendar: calendar
             )
-            guard let occurrence, calendar.isDate(occurrence.start, inSameDayAs: date) else { return nil }
+            guard let occurrence, rule.isSleep == true || calendar.isDate(occurrence.start, inSameDayAs: date) else { return nil }
             return occurrence
         }
         let movedHere = occurrenceOverrides.compactMap { occurrenceOverride -> ScheduleBlock? in
@@ -724,18 +725,70 @@ final class LampStore: ObservableObject {
         return "已把“\(title)”加入计划，并放进了下一个合适的空档。"
     }
 
-    func processWithAgent(input: String) async -> String {
-        if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
+    func processWithAgent(input: String) async throws -> String {
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing") && !ProcessInfo.processInfo.arguments.contains("-mock-sleep-directive") {
             return process(input: input)
         }
-        guard let directive = try? await AgentAPIClient.interpret(input) else {
-            return process(input: input)
+        let combinedInput = clarificationInput.map { "原请求：\($0)\n补充回答：\(input)" } ?? input
+        let directive: AgentDirective
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing") && ProcessInfo.processInfo.arguments.contains("-mock-sleep-directive") {
+            directive = try JSONDecoder().decode(AgentDirective.self, from: Data("""
+            {"name":"set_sleep_schedule","model":"fixture","arguments":{"start_minute":0,"end_minute":480,"weekdays":[1,2,3,4,5,6,7]}}
+            """.utf8))
+        } else {
+            directive = try await AgentAPIClient.interpret(combinedInput)
         }
+        if directive.name != "ask_clarification" { clarificationInput = nil }
         switch directive.name {
+        case "set_sleep_schedule":
+            guard let start = directive.arguments.startMinute, let end = directive.arguments.endMinute,
+                  (0..<1440).contains(start), (0..<1440).contains(end), start != end else {
+                return "请告诉我每晚几点睡、早上几点起床。"
+            }
+            beginTransaction("已撤销睡眠安排")
+            let existing = recurringSchedules.first(where: { $0.isSleep == true })
+            var rule = RecurringScheduleRule(
+                title: "睡眠", detail: input,
+                startsOn: parsedDate(directive.arguments.startsOn) ?? calendar.startOfDay(for: .now),
+                endsOn: parsedDate(directive.arguments.endsOn),
+                weekdays: directive.arguments.weekdays ?? Array(1...7),
+                startMinute: start, durationMinutes: (end - start + 1440) % 1440,
+                timezone: calendar.timeZone.identifier,
+                reason: "每晚睡眠保护时段", provenance: "Lamp 对话"
+            )
+            rule.isSleep = true
+            rule.sleepEndMinute = end
+            rule.startDayOffset = start < 720 ? 1 : 0
+            if let existing {
+                rule.id = existing.id
+                recurringSchedules.removeAll { $0.id == existing.id }
+            }
+            recurringSchedules.append(rule)
+            let horizon = DateInterval(start: calendar.startOfDay(for: .now), end: calendar.date(byAdding: .day, value: 14, to: .now)!)
+            let occupied = expandedBlocks(in: horizon)
+            let sleeps = occupied.filter { $0.isSleep == true }
+            let conflicts = blocks.filter { block in sleeps.contains { $0.start < block.end && block.start < $0.end } }
+            if !conflicts.isEmpty {
+                let movable = conflicts.filter { $0.kind == .focus && $0.planItemID != nil }
+                let ids = Set(movable.map(\.id))
+                let items = planItems.filter { item in movable.contains { $0.planItemID == item.id } }
+                let generated = PlanningEngine(calendar: calendar).makeSchedule(
+                    items: items, fixed: occupied.filter { !ids.contains($0.id) },
+                    context: PlanningContext(horizonStart: .now, horizonEnd: horizon.end)
+                )
+                let moved = generated.filter { block in items.contains { $0.id == block.planItemID } }
+                pendingReplan = ReplanProposal(title: "睡眠与已有日程冲突", summary: "睡眠已保存。请检查调整方案；固定日程需要手动处理。",
+                    changes: conflicts.map { "“\($0.title)”与睡眠重叠" }, reason: "睡眠保护时段",
+                    proposedBlocks: blocks.filter { !ids.contains($0.id) } + moved)
+            }
+            save()
+            toast = "已保存每晚睡眠安排，可撤销"
+            return "已从今晚开始设置重复睡眠，显示在每天时间线末尾。"
         case "set_temporary_state":
             proposeFatigueReplan()
             return "知道了。这只作为临时状态处理。我准备了一份更轻的计划，请先确认。"
         case "ask_clarification":
+            clarificationInput = combinedInput
             return directive.arguments.question ?? "这件事最晚需要在什么时候完成？"
         case "create_item":
             let title = directive.arguments.title ?? inferredTitle(from: input)
@@ -990,7 +1043,7 @@ final class LampStore: ObservableObject {
             horizonStart: calendar.date(on: startOfTomorrow, hour: 9),
             horizonEnd: calendar.date(byAdding: .day, value: 7, to: startOfTomorrow)!
         )
-        let scheduled = PlanningEngine(calendar: calendar).makeSchedule(items: [item], fixed: blocks, context: context)
+        let scheduled = PlanningEngine(calendar: calendar).makeSchedule(items: [item], fixed: expandedBlocks(in: DateInterval(start: context.horizonStart, end: context.horizonEnd)), context: context)
         if let newBlock = scheduled.first(where: { $0.planItemID == item.id }) {
             blocks.append(newBlock)
         }
@@ -1064,7 +1117,7 @@ final class LampStore: ObservableObject {
 
     private func expandedBlocks(in interval: DateInterval) -> [ScheduleBlock] {
         var result: [ScheduleBlock] = []
-        var day = calendar.startOfDay(for: interval.start)
+        var day = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: interval.start))!
         while day < interval.end {
             result.append(contentsOf: blocks(on: day).filter { $0.start < interval.end && $0.end > interval.start })
             guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }

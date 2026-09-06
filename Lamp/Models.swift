@@ -108,6 +108,13 @@ struct ScheduleBlock: Identifiable, Codable, Hashable, Sendable {
     var provenance: String
     var recurringRuleID: UUID?
     var occurrenceDate: Date?
+    var isSleep: Bool?
+
+    var displayTime: String {
+        let prefix = isSleep == true && occurrenceDate.map({ !Calendar.current.isDate($0, inSameDayAs: start) }) == true ? "次日 " : ""
+        let endPrefix = Calendar.current.isDate(start, inSameDayAs: end) ? "" : "次日 "
+        return "\(prefix)\(start.formatted(date: .omitted, time: .shortened))–\(endPrefix)\(end.formatted(date: .omitted, time: .shortened))"
+    }
 
     init(
         id: UUID = UUID(), planItemID: UUID? = nil, title: String, start: Date,
@@ -145,6 +152,9 @@ struct RecurringScheduleRule: Identifiable, Codable, Hashable, Sendable {
     var kind: BlockKind = .fixed
     var reason: String = "由图片识别的重复日程"
     var provenance: String = "DeepSeek 图片识别 · 用户确认"
+    var isSleep: Bool?
+    var startDayOffset: Int?
+    var sleepEndMinute: Int?
 }
 
 struct ScheduleOccurrenceOverride: Identifiable, Codable, Hashable, Sendable {
@@ -175,13 +185,16 @@ enum RecurringScheduleEngine {
         guard rule.weekdays.contains(calendar.component(.weekday, from: day)) else { return nil }
         if override?.isCancelled == true { return nil }
 
+        let actualDay = calendar.date(byAdding: .day, value: rule.startDayOffset ?? 0, to: day) ?? day
         let start = override?.start
-            ?? calendar.date(byAdding: .minute, value: rule.startMinute, to: day)
+            ?? calendar.date(bySettingHour: rule.startMinute / 60, minute: rule.startMinute % 60, second: 0, of: actualDay)
             ?? day
-        let end = override?.end
+        let endDay = calendar.date(byAdding: .day, value: (rule.sleepEndMinute ?? 1440) <= rule.startMinute ? 1 : 0, to: actualDay) ?? actualDay
+        let sleepEnd = rule.sleepEndMinute.flatMap { calendar.date(bySettingHour: $0 / 60, minute: $0 % 60, second: 0, of: endDay) }
+        let end = override?.end ?? sleepEnd
             ?? calendar.date(byAdding: .minute, value: rule.durationMinutes, to: start)
             ?? start
-        return ScheduleBlock(
+        var block = ScheduleBlock(
             id: occurrenceID(ruleID: rule.id, day: day, calendar: calendar),
             title: override?.title ?? rule.title,
             start: start,
@@ -193,6 +206,8 @@ enum RecurringScheduleEngine {
             recurringRuleID: rule.id,
             occurrenceDate: day
         )
+        block.isSleep = rule.isSleep
+        return block
     }
 
     static func occurrenceID(ruleID: UUID, day: Date, calendar: Calendar = .current) -> UUID {
@@ -397,18 +412,21 @@ enum ScheduleCandidateValidator {
         }
 
         for rule in recurringSchedules {
+          for offset in -1...0 {
+            let queryDay = calendar.date(byAdding: .day, value: offset, to: start) ?? start
             let occurrenceOverride = occurrenceOverrides.first {
-                $0.recurringRuleID == rule.id && calendar.isDate($0.occurrenceDate, inSameDayAs: start)
+                $0.recurringRuleID == rule.id && calendar.isDate($0.occurrenceDate, inSameDayAs: queryDay)
             }
             guard let occurrence = RecurringScheduleEngine.occurrence(
                 for: rule,
-                on: start,
+                on: queryDay,
                 override: occurrenceOverride,
                 calendar: calendar
             ) else { continue }
             if start < occurrence.end && end > occurrence.start {
                 return "与重复日程“\(rule.title)”冲突"
             }
+          }
         }
         return nil
     }

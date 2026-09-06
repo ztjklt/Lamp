@@ -15,6 +15,11 @@ struct AgentDirective: Decodable {
         var state: String?
         var note: String?
         var question: String?
+        var startMinute: Int?
+        var endMinute: Int?
+        var weekdays: [Int]?
+        var startsOn: String?
+        var endsOn: String?
 
         enum CodingKeys: String, CodingKey {
             case title, detail, kind, deadline, importance, state, note, question
@@ -22,6 +27,11 @@ struct AgentDirective: Decodable {
             case deadlineHint = "deadline_hint"
             case planningScope = "planning_scope"
             case periodAnchor = "period_anchor"
+            case startMinute = "start_minute"
+            case endMinute = "end_minute"
+            case weekdays
+            case startsOn = "starts_on"
+            case endsOn = "ends_on"
         }
     }
 
