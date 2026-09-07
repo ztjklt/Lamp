@@ -3,6 +3,7 @@ import SwiftUI
 struct TodayView: View {
     @EnvironmentObject private var store: LampStore
     @EnvironmentObject private var router: AppRouter
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var dayTitle: String {
         Date.now.formatted(.dateTime.month(.wide).day().weekday(.wide).locale(Locale(identifier: "zh_CN")))
@@ -48,65 +49,14 @@ struct TodayView: View {
         VStack(alignment: .leading, spacing: 10) {
             SectionLabel(title: "Now")
             if let block = store.currentOrNextBlock {
-                LampCard {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack(alignment: .top, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(block.title)
-                                    .font(.title2.bold())
-                                    .foregroundStyle(LampTheme.ink)
-                                Text("\(block.start.formatted(date: .omitted, time: .shortened))–\(block.end.formatted(date: .omitted, time: .shortened)) · \(block.durationMinutes) 分钟")
-                                    .font(.subheadline.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button {
-                                router.show(.task(block))
-                            } label: {
-                                Image(systemName: "arrow.up.right")
-                                    .frame(width: 44, height: 44)
-                            }
-                            .buttonStyle(.plain)
-                            .lampGlass(.subtle, cornerRadius: 22)
-                            .accessibilityLabel("查看任务详情")
-                            .accessibilityIdentifier("today.now.details")
-                        }
-                        ProgressView(value: progress(for: block))
-                            .tint(LampTheme.amber)
-                            .accessibilityLabel("当前时段进度")
-                        HStack(spacing: 8) {
-                            taskButton("完成", "checkmark", id: "today.now.complete") {
-                                store.complete(block)
-                            }
-                            taskButton("部分", "circle.lefthalf.filled", id: "today.now.partial") {
-                                router.show(.partial(block))
-                            }
-                            taskButton("未做", "xmark", id: "today.now.missed") {
-                                router.show(.missed(block))
-                            }
-                        }
-                        if !block.reason.isEmpty {
-                            Label(block.reason, systemImage: "lightbulb.min")
-                                .font(.caption)
-                                .foregroundStyle(LampTheme.muted)
-                        }
-                        Button {
-                            Task {
-                                do {
-                                    try await LampActivityManager.start(for: block)
-                                    store.postStatus("已在锁屏与灵动岛跟随当前任务")
-                                } catch {
-                                    store.postStatus("暂时无法启动锁屏活动，请检查系统设置")
-                                }
-                            }
-                        } label: {
-                            Label("在锁屏上跟随", systemImage: "iphone.gen3")
-                                .font(.caption.weight(.semibold))
-                                .frame(minHeight: 44)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(LampTheme.ink)
-                        .accessibilityIdentifier("today.now.liveActivity")
+                if block.isSleep == true {
+                    nowBlockContent(block, sleepStyle: true)
+                        .padding(LampTheme.Spacing.card)
+                        .lampSleepSurface()
+                        .accessibilityIdentifier("today.now.sleep")
+                } else {
+                    LampCard {
+                        nowBlockContent(block, sleepStyle: false)
                     }
                 }
             } else {
@@ -144,36 +94,161 @@ struct TodayView: View {
                     Button {
                         router.show(.task(block))
                     } label: {
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(block.title)
-                                    .font(.body.weight(.semibold))
-                                    .strikethrough(block.state == .completed)
-                                    .foregroundStyle(LampTheme.ink)
-                                Text("\(block.displayTime) · \(block.provenance)")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: block.state == .planned ? "chevron.right" : stateIcon(block.state))
-                                .foregroundStyle(block.state == .completed ? LampTheme.sage : LampTheme.amber)
-                        }
-                        .padding(14)
-                        .frame(minHeight: 64)
-                        .background(LampTheme.secondaryBackground.opacity(0.82), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(
-                                    store.highlightedBlockIDs.contains(block.id) ? LampTheme.amber : LampTheme.hairline,
-                                    lineWidth: store.highlightedBlockIDs.contains(block.id) ? 2 : 0.8
-                                )
-                        }
+                        timelineCard(block)
                     }
                     .buttonStyle(.plain)
                     .opacity(block.state == .missed ? 0.58 : 1)
-                    .accessibilityIdentifier("today.timeline.\(block.id.uuidString)")
+                    .accessibilityIdentifier(block.isSleep == true ? "today.sleepCard" : "today.timeline.\(block.id.uuidString)")
                 }
                 .frame(minHeight: 78)
             }
+        }
+    }
+
+    private func nowBlockContent(_ block: ScheduleBlock, sleepStyle: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if sleepStyle && dynamicTypeSize.isAccessibilitySize {
+                nowText(block, sleepStyle: true)
+                HStack {
+                    Spacer()
+                    LampRestAnimation(size: 84)
+                    Spacer()
+                }
+                detailButton(block, sleepStyle: true)
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    nowText(block, sleepStyle: sleepStyle)
+                    Spacer(minLength: 8)
+                    if sleepStyle { LampRestAnimation(size: 100) }
+                    detailButton(block, sleepStyle: sleepStyle)
+                }
+            }
+            ProgressView(value: progress(for: block))
+                .tint(sleepStyle ? LampSleepTheme.accent : LampTheme.amber)
+                .accessibilityLabel("当前时段进度")
+            HStack(spacing: 8) {
+                taskButton("完成", "checkmark", id: "today.now.complete", sleepStyle: sleepStyle) { store.complete(block) }
+                taskButton("部分", "circle.lefthalf.filled", id: "today.now.partial", sleepStyle: sleepStyle) { router.show(.partial(block)) }
+                taskButton("未做", "xmark", id: "today.now.missed", sleepStyle: sleepStyle) { router.show(.missed(block)) }
+            }
+            if !block.reason.isEmpty {
+                Label(block.reason, systemImage: "lightbulb.min")
+                    .font(.caption)
+                    .foregroundStyle(sleepStyle ? LampSleepTheme.secondary : LampTheme.muted)
+            }
+            Button {
+                Task {
+                    do {
+                        try await LampActivityManager.start(for: block)
+                        store.postStatus("已在锁屏与灵动岛跟随当前任务")
+                    } catch {
+                        store.postStatus("暂时无法启动锁屏活动，请检查系统设置")
+                    }
+                }
+            } label: {
+                Label("在锁屏上跟随", systemImage: "iphone.gen3")
+                    .font(.caption.weight(.semibold))
+                    .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(sleepStyle ? LampSleepTheme.foreground : LampTheme.ink)
+            .accessibilityIdentifier("today.now.liveActivity")
+        }
+    }
+
+    private func nowText(_ block: ScheduleBlock, sleepStyle: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if sleepStyle {
+                Label("睡眠时间", systemImage: "moon.stars.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(LampSleepTheme.accent)
+            }
+            Text(block.title)
+                .font(.title2.bold())
+                .foregroundStyle(sleepStyle ? LampSleepTheme.foreground : LampTheme.ink)
+            Text("\(block.displayTime) · \(block.durationMinutes) 分钟")
+                .font(.subheadline.monospacedDigit())
+                .foregroundStyle(sleepStyle ? LampSleepTheme.secondary : Color.secondary)
+        }
+    }
+
+    private func detailButton(_ block: ScheduleBlock, sleepStyle: Bool) -> some View {
+        Button { router.show(.task(block)) } label: {
+            Image(systemName: "arrow.up.right").frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(sleepStyle ? LampSleepTheme.foreground : LampTheme.ink)
+        .lampGlass(.subtle, cornerRadius: 22)
+        .accessibilityLabel("查看任务详情")
+        .accessibilityIdentifier("today.now.details")
+    }
+
+    @ViewBuilder private func timelineCard(_ block: ScheduleBlock) -> some View {
+        if block.isSleep == true {
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sleepTimelineText(block)
+                        HStack {
+                            Spacer()
+                            LampRestAnimation(size: 72)
+                            Spacer()
+                        }
+                    }
+                } else {
+                    HStack(alignment: .center, spacing: 10) {
+                        sleepTimelineText(block)
+                        Spacer(minLength: 4)
+                        LampRestAnimation(size: 88)
+                        Image(systemName: block.state == .planned ? "chevron.right" : stateIcon(block.state))
+                            .foregroundStyle(block.state == .completed ? LampTheme.sage : LampSleepTheme.accent)
+                    }
+                }
+            }
+            .padding(12)
+            .frame(minHeight: 92)
+            .lampSleepSurface(cornerRadius: 18, highlighted: store.highlightedBlockIDs.contains(block.id))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(block.title)，\(block.displayTime)，\(block.provenance)")
+        } else {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(block.title)
+                        .font(.body.weight(.semibold))
+                        .strikethrough(block.state == .completed)
+                        .foregroundStyle(LampTheme.ink)
+                    Text("\(block.displayTime) · \(block.provenance)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: block.state == .planned ? "chevron.right" : stateIcon(block.state))
+                    .foregroundStyle(block.state == .completed ? LampTheme.sage : LampTheme.amber)
+            }
+            .padding(14)
+            .frame(minHeight: 64)
+            .background(LampTheme.secondaryBackground.opacity(0.82), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(
+                        store.highlightedBlockIDs.contains(block.id) ? LampTheme.amber : LampTheme.hairline,
+                        lineWidth: store.highlightedBlockIDs.contains(block.id) ? 2 : 0.8
+                    )
+            }
+        }
+    }
+
+    private func sleepTimelineText(_ block: ScheduleBlock) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label(block.title, systemImage: "moon.stars.fill")
+                .font(.body.weight(.semibold))
+                .strikethrough(block.state == .completed)
+                .foregroundStyle(LampSleepTheme.foreground)
+            Text(block.displayTime)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(LampSleepTheme.secondary)
+            Text(block.provenance)
+                .font(.caption2)
+                .foregroundStyle(LampSleepTheme.secondary.opacity(0.86))
         }
     }
 
@@ -193,6 +268,7 @@ struct TodayView: View {
         _ title: String,
         _ icon: String,
         id: String,
+        sleepStyle: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -201,8 +277,9 @@ struct TodayView: View {
                 .frame(maxWidth: .infinity, minHeight: 44)
         }
         .buttonStyle(.plain)
-        .background(LampTheme.controlBackground.opacity(0.96), in: Capsule())
-        .overlay(Capsule().stroke(LampTheme.hairline, lineWidth: 0.7))
+        .foregroundStyle(sleepStyle ? LampSleepTheme.foreground : LampTheme.ink)
+        .background(sleepStyle ? Color.white.opacity(0.11) : LampTheme.controlBackground.opacity(0.96), in: Capsule())
+        .overlay(Capsule().stroke(sleepStyle ? Color.white.opacity(0.18) : LampTheme.hairline, lineWidth: 0.7))
         .accessibilityIdentifier(id)
     }
 
@@ -241,6 +318,27 @@ struct TaskDetailView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if block.isSleep == true {
+                    Section {
+                        VStack(spacing: 4) {
+                            LampRestAnimation(size: 132)
+                            Label("舒缓入睡", systemImage: "moon.stars.fill")
+                                .font(.headline)
+                                .foregroundStyle(LampSleepTheme.foreground)
+                            Text(block.displayTime)
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(LampSleepTheme.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .lampSleepSurface(cornerRadius: 22)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("睡眠，\(block.displayTime)")
+                        .accessibilityIdentifier("task.sleepHero")
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                    }
+                }
                 Section("任务") {
                     if !canEdit {
                         LabeledContent("名称", value: block.title)

@@ -2,7 +2,7 @@ import XCTest
 
 final class LampUITests: XCTestCase {
     func testNightlySleepAppearsInToday() {
-        launch(extraArguments: ["-mock-sleep-directive"])
+        launch(extraArguments: ["-mock-sleep-directive", "-freeze-rest-animation"])
         app.descendants(matching: .any)["global.tellLamp"].tap()
         let input = app.descendants(matching: .any)["tellLamp.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 3))
@@ -14,6 +14,18 @@ final class LampUITests: XCTestCase {
         for _ in 0..<5 where !app.staticTexts["睡眠"].isHittable { app.swipeUp() }
         XCTAssertTrue(app.staticTexts["睡眠"].exists)
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "次日")).firstMatch.exists)
+
+        let todaySleepCard = app.buttons["today.sleepCard"]
+        for _ in 0..<4 where !todaySleepCard.isHittable { app.swipeUp() }
+        XCTAssertTrue(todaySleepCard.waitForExistence(timeout: 2))
+        todaySleepCard.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["task.sleepHero"].waitForExistence(timeout: 2))
+        app.buttons["关闭"].tap()
+
+        app.tabBars.buttons["日程"].tap()
+        let weekSleepCard = app.buttons["week.sleepCard"]
+        for _ in 0..<5 where !weekSleepCard.isHittable { app.swipeUp() }
+        XCTAssertTrue(weekSleepCard.waitForExistence(timeout: 2))
     }
     private var app: XCUIApplication!
 
@@ -151,7 +163,7 @@ final class LampUITests: XCTestCase {
 
     func testRecurringScheduleOffersSingleAndSeriesDeletion() {
         launch(extraArguments: ["-mock-recurring-schedule"])
-        let recurring = app.staticTexts["每周设计复盘"]
+        let recurring = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "每周设计复盘")).firstMatch
         for _ in 0..<4 where !recurring.isHittable { app.swipeUp() }
         XCTAssertTrue(recurring.waitForExistence(timeout: 3))
         recurring.tap()

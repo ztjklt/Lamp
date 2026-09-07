@@ -3,6 +3,7 @@ import SwiftUI
 struct ScheduleView: View {
     @EnvironmentObject private var store: LampStore
     @EnvironmentObject private var router: AppRouter
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var timeframe: PlanTimeframe = .week
     @State private var anchorDate = Date.now
     @State private var selectedDay = Calendar.autoupdatingCurrent.startOfDay(for: .now)
@@ -131,22 +132,69 @@ struct ScheduleView: View {
         } else {
             ForEach(selectedBlocks) { block in
                 Button { router.show(.task(block)) } label: {
-                    HStack(spacing: 14) {
-                        RoundedRectangle(cornerRadius: 2).fill(block.kind.color).frame(width: 4, height: 48)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(block.title).font(.body.weight(.semibold)).foregroundStyle(LampTheme.ink)
-                            Text(block.displayTime)
-                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Text(block.kind == .fixed ? "固定" : "灵活").font(.caption2.weight(.medium)).foregroundStyle(block.kind.color)
-                            .padding(.horizontal, 8).padding(.vertical, 5).background(block.kind.color.opacity(0.12), in: Capsule())
-                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
-                    }
-                    .padding(14).background(LampTheme.secondaryBackground.opacity(0.82), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    selectedDayCard(block)
                 }
-                .buttonStyle(.plain).accessibilityIdentifier("week.block.\(block.id.uuidString)")
+                .buttonStyle(.plain)
+                .accessibilityIdentifier(block.isSleep == true ? "week.sleepCard" : "week.block.\(block.id.uuidString)")
             }
+        }
+    }
+
+    @ViewBuilder private func selectedDayCard(_ block: ScheduleBlock) -> some View {
+        if block.isSleep == true {
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 8) {
+                        sleepDayText(block)
+                        HStack {
+                            Spacer()
+                            LampRestAnimation(size: 52)
+                            Spacer()
+                        }
+                    }
+                } else {
+                    HStack(spacing: 12) {
+                        LampRestAnimation(size: 60)
+                        sleepDayText(block)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(LampSleepTheme.secondary)
+                    }
+                }
+            }
+            .padding(12)
+            .lampSleepSurface(cornerRadius: 18)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(block.title)，\(block.displayTime)")
+        } else {
+            HStack(spacing: 14) {
+                RoundedRectangle(cornerRadius: 2).fill(block.kind.color).frame(width: 4, height: 48)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(block.title).font(.body.weight(.semibold)).foregroundStyle(LampTheme.ink)
+                    Text(block.displayTime)
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(block.kind == .fixed ? "固定" : "灵活").font(.caption2.weight(.medium)).foregroundStyle(block.kind.color)
+                    .padding(.horizontal, 8).padding(.vertical, 5).background(block.kind.color.opacity(0.12), in: Capsule())
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(14).background(LampTheme.secondaryBackground.opacity(0.82), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private func sleepDayText(_ block: ScheduleBlock) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(block.title, systemImage: "moon.stars.fill")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(LampSleepTheme.foreground)
+            Text(block.displayTime)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(LampSleepTheme.secondary)
+            Text("睡眠日程")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(LampSleepTheme.accent)
         }
     }
 

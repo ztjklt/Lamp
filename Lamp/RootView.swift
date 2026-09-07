@@ -113,6 +113,7 @@ struct AppShell: View {
                 .accessibilityIdentifier(LampDestination.profile.accessibilityID)
         }
         .tint(LampTheme.amber)
+        .background(TabBarAccessibilityConfigurator())
         .sheet(item: $router.presentedFlow) { flow in
             presentedView(for: flow)
         }
@@ -232,6 +233,43 @@ struct AppShell: View {
                 router.show(.partial(block))
             }
         }
+    }
+}
+
+/// SwiftUI does not consistently forward tab-item identifiers to UITabBarItem on every iOS release.
+/// Apply them at the native tab-bar boundary so VoiceOver and UI automation see stable controls.
+private struct TabBarAccessibilityConfigurator: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            guard let root = uiView.window?.rootViewController,
+                  let tabBarController = findTabBarController(in: root),
+                  let items = tabBarController.tabBar.items,
+                  items.count >= LampDestination.allCases.count else { return }
+
+            let identifiers = ["tab.today", "tab.week", "global.tellLamp", "tab.roadmap", "tab.profile"]
+            for (item, identifier) in zip(items, identifiers) {
+                item.accessibilityIdentifier = identifier
+            }
+            items[2].accessibilityLabel = "和 Lamp 对话"
+            items[2].accessibilityHint = "打开文字、语音和图片日程输入"
+        }
+    }
+
+    private func findTabBarController(in controller: UIViewController) -> UITabBarController? {
+        if let tabBarController = controller as? UITabBarController { return tabBarController }
+        for child in controller.children {
+            if let result = findTabBarController(in: child) { return result }
+        }
+        if let presented = controller.presentedViewController {
+            return findTabBarController(in: presented)
+        }
+        return nil
     }
 }
 
