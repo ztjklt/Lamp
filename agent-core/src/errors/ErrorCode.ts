@@ -1,0 +1,18 @@
+export const ERROR_CODES = [
+  "VALIDATION_ERROR",
+  "AUTH_ERROR",
+  "POLICY_DENIED",
+  "TOOL_ERROR",
+  "LLM_ERROR",
+  "MODEL_TIMEOUT",
+  "MODEL_INVALID_OUTPUT",
+  "PLANNING_FAILED",
+  "NO_FEASIBLE_PLAN",
+  "CONFLICT_ERROR",
+  "STALE_STATE",
+  "DATABASE_ERROR",
+  "RATE_LIMIT",
+  "INTERNAL_ERROR",
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];

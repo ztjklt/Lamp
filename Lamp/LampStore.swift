@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import UserNotifications
 
 @MainActor
@@ -35,6 +36,12 @@ final class LampStore: ObservableObject {
 
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
             apply(DemoData.snapshot(calendar: calendar))
+            if ProcessInfo.processInfo.arguments.contains("-mock-incomplete-replan-scenario") {
+                applyIncompleteReplanFixture()
+            }
+            if ProcessInfo.processInfo.arguments.contains("-mock-language-replan-scenario") {
+                applyLanguageReplanFixture()
+            }
             if ProcessInfo.processInfo.arguments.contains("-mock-recurring-schedule") {
                 let today = calendar.startOfDay(for: .now)
                 recurringSchedules.append(RecurringScheduleRule(
@@ -56,6 +63,10 @@ final class LampStore: ObservableObject {
     }
 
     var currentOrNextBlock: ScheduleBlock? {
+        if ProcessInfo.processInfo.arguments.contains("-mock-incomplete-replan-scenario"),
+           let math = todayBlocks.first(where: { $0.title == "复习高数" && $0.state == .planned }) {
+            return math
+        }
         let now = Date.now
         return todayBlocks.first(where: { $0.start <= now && $0.end > now && $0.state == .planned })
             ?? todayBlocks.first(where: { $0.end > now && $0.state == .planned })
@@ -267,6 +278,152 @@ final class LampStore: ObservableObject {
             proposedBlocks: proposed
         )
         save()
+    }
+
+    func proposeMissedWithAgent(_ block: ScheduleBlock, reason: String) async throws {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-ui-testing") && !arguments.contains("-live-agent-core-replan") {
+            proposeMissed(block, reason: reason)
+            return
+        }
+        guard block.kind == .focus,
+              let taskID = block.planItemID,
+              let task = planItems.first(where: { $0.id == taskID && !$0.isPaused }) else {
+            proposeMissed(block, reason: reason)
+            return
+        }
+
+        beginTransaction("已撤销未做记录和重排")
+        setBlock(
+            block,
+            state: .missed,
+            completedMinutes: 0,
+            reason: reason.isEmpty ? "本次未完成" : reason
+        )
+        save()
+
+        let occurredAt = agentReferenceDate()
+        let dayStart = calendar.startOfDay(for: occurredAt)
+        guard let horizonEnd = calendar.date(byAdding: .day, value: 4, to: dayStart) else {
+            throw AgentAPIClient.ClientError.invalidResponse
+        }
+        let horizon = DateInterval(start: dayStart, end: horizonEnd)
+        let activeTasks = planItems.filter {
+            ($0.kind == .task || $0.kind == .step) && !$0.isPaused && $0.remainingMinutes > 0
+        }
+        let activeTaskIDs = Set(activeTasks.map(\.id))
+        guard activeTaskIDs.contains(taskID) else { throw AgentAPIClient.ClientError.invalidResponse }
+        let requestTasks = activeTasks.map { item in
+            AgentPlanDayRequest.Task(
+                id: item.id,
+                goalId: item.parentID,
+                title: String(item.title.prefix(240)),
+                detail: String(item.detail.prefix(4_000)),
+                importance: min(5, max(1, item.importance)),
+                deadline: item.deadline,
+                estimatedMinutes: max(0, item.estimatedMinutes),
+                remainingMinutes: max(0, item.remainingMinutes),
+                isPaused: item.isPaused,
+                isSplittable: item.isSplittable,
+                minimumSessionMinutes: min(15, max(1, item.remainingMinutes)),
+                maximumSessionMinutes: max(15, min(90, max(1, item.remainingMinutes))),
+                preferredPeriods: item.preferredPeriod.map { [$0.rawValue] } ?? [],
+                dependencyIds: item.dependencyIDs.filter(activeTaskIDs.contains),
+                availableWindows: []
+            )
+        }
+        let schedule = expandedBlocks(in: horizon)
+        let fingerprint = planningStateFingerprint()
+        let eventID = UUID()
+        let request = AgentIncompleteReplanRequest(
+            eventId: eventID,
+            sourceFingerprint: fingerprint,
+            occurredAt: occurredAt,
+            timezone: calendar.timeZone.identifier,
+            locale: Locale.current.identifier,
+            planningHorizon: .init(start: horizon.start, end: horizon.end),
+            taskId: taskID,
+            incompleteBlockId: block.id,
+            additionalMinutes: max(1, min(block.durationMinutes, task.remainingMinutes)),
+            tasks: requestTasks,
+            schedule: schedule.map { item in
+                AgentPlanDayRequest.ExistingBlock(
+                    id: item.id,
+                    taskId: item.planItemID.flatMap { activeTaskIDs.contains($0) ? $0 : nil },
+                    title: String(item.title.prefix(240)),
+                    startsAt: item.start,
+                    endsAt: item.end,
+                    kind: item.kind == .breakTime ? "break" : item.kind.rawValue,
+                    state: item.state.rawValue,
+                    locked: item.kind == .fixed || item.recurringRuleID != nil,
+                    provenance: String((item.provenance.isEmpty ? "Lamp" : item.provenance).prefix(500))
+                )
+            },
+            preferences: planningPreferences()
+        )
+        let response = try await AgentAPIClient.replanIncomplete(request)
+        guard response.status == "proposal", let proposal = response.proposal,
+              proposal.sourceEventId == eventID else {
+            pendingReplan = nil
+            toast = response.diagnostics.first ?? "未完成已记录，目前不需要调整后续日程"
+            return
+        }
+
+        let changedProposedIDs = Set(proposal.changes.compactMap { change in
+            ["ADD", "MOVE", "RESIZE"].contains(change.type) ? change.proposedBlockId : nil
+        })
+        let affectedBlockIDs = proposal.changes.compactMap { change -> UUID? in
+            guard change.type != "UNCHANGED", let previousID = change.previousBlockId,
+                  previousID != block.id, blocks.contains(where: { $0.id == previousID }) else { return nil }
+            return previousID
+        }
+        let proposed = proposal.blocks.compactMap { candidate -> ScheduleBlock? in
+            guard changedProposedIDs.contains(candidate.id), activeTaskIDs.contains(candidate.taskId),
+                  candidate.startsAt >= horizon.start, candidate.endsAt <= horizon.end,
+                  candidate.endsAt > candidate.startsAt else { return nil }
+            return ScheduleBlock(
+                id: candidate.id,
+                planItemID: candidate.taskId,
+                title: candidate.title,
+                start: candidate.startsAt,
+                end: candidate.endsAt,
+                kind: .focus,
+                reason: localizedReason(candidate.reasonCodes),
+                provenance: "Lamp Agent Core · 待确认"
+            )
+        }
+        let occupied = schedule.filter {
+            !affectedBlockIDs.contains($0.id) && $0.state != .missed
+        }
+        guard proposed.count == changedProposedIDs.count,
+              proposedDayBlocksAreSafe(proposed, against: occupied) else {
+            throw AgentAPIClient.ClientError.invalidResponse
+        }
+        let changes = proposed.map {
+            "“\($0.title)” · \($0.start.formatted(date: .abbreviated, time: .shortened))–\($0.end.formatted(date: .omitted, time: .shortened))"
+        } + proposal.warnings
+        pendingReplan = ReplanProposal(
+            id: proposal.id,
+            title: proposal.title,
+            summary: proposal.summary,
+            changes: changes,
+            reason: proposal.reason,
+            proposedBlocks: proposed,
+            mode: .incompleteTask,
+            sourceFingerprint: fingerprint,
+            sourceEventID: eventID,
+            affectedBlockIDs: affectedBlockIDs
+        )
+        if arguments.contains("-invalidate-agent-replan-proposal") {
+            let changedDay = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
+            blocks.append(ScheduleBlock(
+                title: "测试中的状态变化",
+                start: calendar.date(on: changedDay, hour: 6),
+                end: calendar.date(on: changedDay, hour: 6, minute: 5),
+                kind: .breakTime,
+                reason: "仅用于验证过期提案保护"
+            ))
+        }
     }
 
     func mark(_ block: ScheduleBlock, as state: CompletionState) {
@@ -726,8 +883,18 @@ final class LampStore: ObservableObject {
     }
 
     func processWithAgent(input: String) async throws -> String {
-        if ProcessInfo.processInfo.arguments.contains("-ui-testing") && !ProcessInfo.processInfo.arguments.contains("-mock-sleep-directive") {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-ui-testing")
+            && !arguments.contains("-mock-sleep-directive")
+            && !arguments.contains("-live-agent-core")
+            && !arguments.contains("-live-agent-core-language") {
             return process(input: input)
+        }
+        if isDayPlanningRequest(input) {
+            return try await proposeDayPlan()
+        }
+        if isLanguageReplanningRequest(input) {
+            return try await proposeLanguageReplan(input: input)
         }
         let combinedInput = clarificationInput.map { "原请求：\($0)\n补充回答：\(input)" } ?? input
         let directive: AgentDirective
@@ -846,6 +1013,80 @@ final class LampStore: ObservableObject {
 
     func applyPendingReplan() {
         guard let proposal = pendingReplan else { return }
+        if proposal.mode == .languageReplan {
+            guard proposal.sourceFingerprint == planningStateFingerprint() else {
+                pendingReplan = nil
+                toast = "任务或日程已变化，请重新生成调整方案"
+                return
+            }
+            let affectedIDs = Set(proposal.affectedBlockIDs)
+            let occupied = proposal.proposedBlocks.flatMap { blocks(on: $0.start) }.filter {
+                !affectedIDs.contains($0.id) && $0.state != .missed
+            }
+            guard proposedDayBlocksAreSafe(proposal.proposedBlocks, against: occupied) else {
+                pendingReplan = nil
+                toast = "调整方案发生冲突，请重新生成"
+                return
+            }
+            beginTransaction("已恢复语言调整前的计划")
+            blocks.removeAll { affectedIDs.contains($0.id) }
+            blocks.append(contentsOf: proposal.proposedBlocks)
+            blocks.sort { $0.start < $1.start }
+            if let state = proposal.temporaryStateTitle {
+                temporaryStates.append(TemporaryState(
+                    title: state,
+                    expiresAt: calendar.date(byAdding: .day, value: 1, to: .now)!,
+                    workloadMultiplier: 0.55
+                ))
+            }
+            pendingReplan = nil
+            toast = "已按临时状态减轻点名任务"
+            save()
+            return
+        }
+        if proposal.mode == .incompleteTask {
+            guard proposal.sourceFingerprint == planningStateFingerprint() else {
+                pendingReplan = nil
+                toast = "任务或日程已变化，请重新生成重排"
+                return
+            }
+            let affectedIDs = Set(proposal.affectedBlockIDs)
+            let occupied = proposal.proposedBlocks.flatMap { blocks(on: $0.start) }.filter {
+                !affectedIDs.contains($0.id) && $0.state != .missed
+            }
+            guard proposedDayBlocksAreSafe(proposal.proposedBlocks, against: occupied) else {
+                pendingReplan = nil
+                toast = "重排发生冲突，请重新生成"
+                return
+            }
+            blocks.removeAll { affectedIDs.contains($0.id) }
+            blocks.append(contentsOf: proposal.proposedBlocks)
+            blocks.sort { $0.start < $1.start }
+            pendingReplan = nil
+            toast = "未完成已记录，局部重排已应用"
+            save()
+            return
+        }
+        if proposal.mode == .dayPlan {
+            guard proposal.sourceFingerprint == planningStateFingerprint() else {
+                pendingReplan = nil
+                toast = "任务或日程已变化，请重新生成计划"
+                return
+            }
+            let current = proposal.proposedBlocks.flatMap { blocks(on: $0.start) }
+            guard proposedDayBlocksAreSafe(proposal.proposedBlocks, against: current) else {
+                pendingReplan = nil
+                toast = "计划发生冲突，请重新生成"
+                return
+            }
+            beginTransaction("已移除刚加入的今日计划")
+            blocks.append(contentsOf: proposal.proposedBlocks)
+            blocks.sort { $0.start < $1.start }
+            pendingReplan = nil
+            toast = "今日计划已加入时间线"
+            save()
+            return
+        }
         beginTransaction("已恢复调整前的计划")
         blocks = proposal.proposedBlocks
         if proposal.reason.contains("疲惫") {
@@ -861,8 +1102,357 @@ final class LampStore: ObservableObject {
     }
 
     func dismissPendingReplan() {
+        let mode = pendingReplan?.mode
         pendingReplan = nil
-        toast = "已保留当前计划"
+        if mode == .incompleteTask {
+            toast = "未完成已记录，后续计划保持不变"
+        } else if mode == .languageReplan {
+            toast = "没有改动当前计划"
+        } else {
+            toast = "已保留当前计划"
+        }
+    }
+
+    private func isDayPlanningRequest(_ input: String) -> Bool {
+        let normalized = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let adjustmentSignals = ["很累", "疲惫", "没完成", "未完成", "调整", "放轻", "生病", "tired", "incomplete", "replan"]
+        guard !adjustmentSignals.contains(where: normalized.contains) else { return false }
+        let hasDay = ["今天", "今日", "一天", "today", "my day"].contains(where: normalized.contains)
+        let hasPlanningAction = ["安排", "规划", "计划", "排程", "plan", "schedule"].contains(where: normalized.contains)
+        return hasDay && hasPlanningAction
+    }
+
+    private func isLanguageReplanningRequest(_ input: String) -> Bool {
+        let normalized = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let hasTemporaryState = ["累", "疲惫", "精力不足", "tired", "exhausted"].contains(where: normalized.contains)
+        let hasReduction = ["少", "减", "轻一点", "缩短", "reduce", "less"].contains(where: normalized.contains)
+        let namesTask = planItems.contains { item in
+            guard item.kind == .task || item.kind == .step else { return false }
+            return normalized.contains(item.title.lowercased()) ||
+                (normalized.contains("高数") && (item.title.contains("高数") || item.title.contains("微积分")))
+        }
+        return hasTemporaryState && hasReduction && namesTask
+    }
+
+    private func proposeLanguageReplan(input: String, now: Date = .now) async throws -> String {
+        let requestedAt = agentReferenceDate(fallback: now)
+        let dayStart = calendar.startOfDay(for: requestedAt)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart), requestedAt < dayEnd else {
+            return "今天已经没有可调整的时间了。"
+        }
+        let horizon = DateInterval(start: requestedAt, end: dayEnd)
+        let taskItems = planItems.filter {
+            ($0.kind == .task || $0.kind == .step) && !$0.isPaused && $0.remainingMinutes > 0
+        }
+        let taskIDs = Set(taskItems.map(\.id))
+        let schedule = expandedBlocks(in: DateInterval(start: dayStart, end: dayEnd)).filter {
+            $0.end > requestedAt && $0.start < dayEnd
+        }
+        let requestTasks = taskItems.map { item in
+            AgentPlanDayRequest.Task(
+                id: item.id,
+                goalId: item.parentID,
+                title: String(item.title.prefix(240)),
+                detail: String(item.detail.prefix(4_000)),
+                importance: min(5, max(1, item.importance)),
+                deadline: item.deadline,
+                estimatedMinutes: max(0, item.estimatedMinutes),
+                remainingMinutes: max(0, item.remainingMinutes),
+                isPaused: item.isPaused,
+                isSplittable: item.isSplittable,
+                minimumSessionMinutes: min(15, max(1, item.remainingMinutes)),
+                maximumSessionMinutes: max(15, min(90, max(1, item.remainingMinutes))),
+                preferredPeriods: item.preferredPeriod.map { [$0.rawValue] } ?? [],
+                dependencyIds: item.dependencyIDs.filter(taskIDs.contains),
+                availableWindows: []
+            )
+        }
+        guard !requestTasks.isEmpty else { return "当前没有可以减轻的任务。" }
+
+        let fingerprint = planningStateFingerprint()
+        let requestID = UUID()
+        let request = AgentLanguageReplanRequest(
+            requestId: requestID,
+            sourceFingerprint: fingerprint,
+            requestedAt: requestedAt,
+            timezone: calendar.timeZone.identifier,
+            locale: Locale.current.identifier,
+            input: String(input.prefix(4_000)),
+            planningHorizon: .init(start: horizon.start, end: horizon.end),
+            tasks: requestTasks,
+            schedule: schedule.map { block in
+                AgentPlanDayRequest.ExistingBlock(
+                    id: block.id,
+                    taskId: block.planItemID.flatMap { taskIDs.contains($0) ? $0 : nil },
+                    title: String(block.title.prefix(240)),
+                    startsAt: max(block.start, horizon.start),
+                    endsAt: min(block.end, horizon.end),
+                    kind: block.kind == .breakTime ? "break" : block.kind.rawValue,
+                    state: block.state.rawValue,
+                    locked: block.kind == .fixed || block.recurringRuleID != nil,
+                    provenance: String((block.provenance.isEmpty ? "Lamp" : block.provenance).prefix(500))
+                )
+            },
+            preferences: planningPreferences()
+        )
+        let response = try await AgentAPIClient.replanLanguage(request)
+        guard response.trace.intent == "replan_schedule",
+              response.trace.decision.intent == "replan_schedule",
+              response.trace.decision.action == "reduce_task_workload",
+              response.trace.decision.temporaryState == "tired",
+              taskIDs.contains(response.trace.decision.taskId) else {
+            throw AgentAPIClient.ClientError.invalidResponse
+        }
+        guard response.status == "proposal", let proposal = response.proposal,
+              proposal.sourceRequestId == requestID else {
+            return response.trace.diagnostics.first ?? "当前约束下无法安全地减轻这项任务。"
+        }
+
+        let changedProposedIDs = Set(proposal.changes.compactMap { change in
+            ["ADD", "MOVE", "RESIZE"].contains(change.type) ? change.proposedBlockId : nil
+        })
+        let affectedBlockIDs = proposal.changes.compactMap { change -> UUID? in
+            guard change.type != "UNCHANGED", let previousID = change.previousBlockId,
+                  blocks.contains(where: { $0.id == previousID }) else { return nil }
+            return previousID
+        }
+        let proposed = proposal.blocks.compactMap { candidate -> ScheduleBlock? in
+            guard changedProposedIDs.contains(candidate.id), taskIDs.contains(candidate.taskId),
+                  candidate.startsAt >= horizon.start, candidate.endsAt <= horizon.end,
+                  candidate.endsAt > candidate.startsAt else { return nil }
+            return ScheduleBlock(
+                id: candidate.id,
+                planItemID: candidate.taskId,
+                title: candidate.title,
+                start: candidate.startsAt,
+                end: candidate.endsAt,
+                kind: .focus,
+                reason: localizedReason(candidate.reasonCodes),
+                provenance: "Lamp Agent Core · LLM + Planner · 待确认"
+            )
+        }
+        let occupied = schedule.filter {
+            !affectedBlockIDs.contains($0.id) && $0.state != .missed
+        }
+        guard proposed.count == changedProposedIDs.count,
+              proposedDayBlocksAreSafe(proposed, against: occupied) else {
+            throw AgentAPIClient.ClientError.invalidResponse
+        }
+        let modelLabel = response.trace.model.provider == "deepseek" ? "DeepSeek" : "本地模型桩"
+        let changes = ["\(modelLabel) 识别：临时疲惫，点名减少“\(planItems.first(where: { $0.id == response.trace.decision.taskId })?.title ?? "任务")”"] +
+            proposed.map { "Planner：\($0.start.formatted(date: .omitted, time: .shortened))–\($0.end.formatted(date: .omitted, time: .shortened))，\($0.durationMinutes) 分钟" } +
+            proposal.warnings
+        pendingReplan = ReplanProposal(
+            id: proposal.id,
+            title: proposal.title,
+            summary: proposal.summary,
+            changes: changes,
+            reason: proposal.reason,
+            proposedBlocks: proposed,
+            mode: .languageReplan,
+            sourceFingerprint: fingerprint,
+            affectedBlockIDs: affectedBlockIDs,
+            temporaryStateTitle: "疲惫"
+        )
+        if ProcessInfo.processInfo.arguments.contains("-invalidate-agent-language-proposal") {
+            let changedDay = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
+            blocks.append(ScheduleBlock(
+                title: "测试中的状态变化",
+                start: calendar.date(on: changedDay, hour: 6),
+                end: calendar.date(on: changedDay, hour: 6, minute: 5),
+                kind: .breakTime,
+                reason: "仅用于验证过期提案保护"
+            ))
+        }
+        return "我先把你的话理解成结构化调整，再由 Planner 生成了候选；确认前不会改动时间线。"
+    }
+
+    private func proposeDayPlan(now: Date = .now) async throws -> String {
+        let planningNow = agentReferenceDate(fallback: now)
+        let dayStart = calendar.startOfDay(for: planningNow)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else {
+            return "无法确定今天的结束时间。"
+        }
+        let minute = calendar.component(.minute, from: planningNow)
+        let roundedStart = calendar.date(byAdding: .minute, value: (15 - minute % 15) % 15, to: planningNow) ?? planningNow
+        guard roundedStart < dayEnd else { return "今天已经没有可安排的时间了。" }
+
+        let horizon = DateInterval(start: roundedStart, end: dayEnd)
+        let todayBlocks = expandedBlocks(in: DateInterval(start: dayStart, end: dayEnd))
+        let occupied = todayBlocks.filter { $0.start < horizon.end && $0.end > horizon.start }
+        let taskItems = planItems.filter {
+            ($0.kind == .task || $0.kind == .step) && !$0.isPaused && $0.remainingMinutes > 0
+        }
+        let scheduledMinutes = Dictionary(grouping: todayBlocks.filter {
+            $0.kind == .focus && ($0.state == .planned || $0.state == .active)
+                && $0.planItemID != nil
+        }, by: { $0.planItemID! }).mapValues { blocks in
+            blocks.reduce(0) { $0 + $1.durationMinutes }
+        }
+        let requestTasks = taskItems.compactMap { item -> AgentPlanDayRequest.Task? in
+            let unplannedMinutes = max(0, item.remainingMinutes - (scheduledMinutes[item.id] ?? 0))
+            guard unplannedMinutes > 0 else { return nil }
+            return AgentPlanDayRequest.Task(
+                id: item.id,
+                goalId: item.parentID,
+                title: String(item.title.prefix(240)),
+                detail: String(item.detail.prefix(4_000)),
+                importance: min(5, max(1, item.importance)),
+                deadline: item.deadline,
+                estimatedMinutes: max(0, item.estimatedMinutes),
+                remainingMinutes: unplannedMinutes,
+                isPaused: item.isPaused,
+                isSplittable: item.isSplittable,
+                minimumSessionMinutes: min(20, unplannedMinutes),
+                maximumSessionMinutes: max(20, min(90, unplannedMinutes)),
+                preferredPeriods: item.preferredPeriod.map { [$0.rawValue] } ?? [],
+                dependencyIds: item.dependencyIDs,
+                availableWindows: []
+            )
+        }
+        guard !requestTasks.isEmpty else { return "今天的任务都已经安排好了。" }
+        let requestTaskIDs = Set(requestTasks.map(\.id))
+
+        let fingerprint = planningStateFingerprint()
+        let request = AgentPlanDayRequest(
+            requestId: UUID(),
+            sourceFingerprint: fingerprint,
+            requestedAt: planningNow,
+            timezone: calendar.timeZone.identifier,
+            locale: Locale.current.identifier,
+            horizon: .init(start: roundedStart, end: dayEnd),
+            focusMinutesBeforeHorizon: todayBlocks.filter {
+                $0.kind == .focus && $0.state != .missed && $0.start < roundedStart
+            }.reduce(0) { total, block in
+                total + max(0, Int(min(block.end, roundedStart).timeIntervalSince(max(block.start, dayStart)) / 60))
+            },
+            tasks: requestTasks,
+            schedule: occupied.map { block in
+                AgentPlanDayRequest.ExistingBlock(
+                    id: block.id,
+                    taskId: block.planItemID.flatMap { requestTaskIDs.contains($0) ? $0 : nil },
+                    title: String(block.title.prefix(240)),
+                    startsAt: max(block.start, roundedStart),
+                    endsAt: min(block.end, dayEnd),
+                    kind: block.kind == .breakTime ? "break" : block.kind.rawValue,
+                    state: block.state.rawValue,
+                    locked: block.kind == .fixed || block.recurringRuleID != nil,
+                    provenance: String((block.provenance.isEmpty ? "Lamp" : block.provenance).prefix(500))
+                )
+            },
+            preferences: planningPreferences()
+        )
+        let response = try await AgentAPIClient.planDay(request)
+        guard response.status == "proposal", let proposal = response.proposal else {
+            return response.diagnostics.first ?? "今天没有足够的可用时间容纳待安排任务。"
+        }
+        let proposed = proposal.blocks.compactMap { block -> ScheduleBlock? in
+            guard requestTaskIDs.contains(block.taskId), block.startsAt >= roundedStart, block.endsAt <= dayEnd,
+                  block.endsAt > block.startsAt else { return nil }
+            return ScheduleBlock(
+                id: block.id,
+                planItemID: block.taskId,
+                title: block.title,
+                start: block.startsAt,
+                end: block.endsAt,
+                kind: .focus,
+                reason: localizedReason(block.reasonCodes),
+                provenance: "Lamp Agent Core · 待确认"
+            )
+        }
+        guard proposed.count == proposal.blocks.count,
+              proposedDayBlocksAreSafe(proposed, against: occupied) else {
+            throw AgentAPIClient.ClientError.invalidResponse
+        }
+        let changes = proposed.map {
+            "“\($0.title)” · \($0.start.formatted(date: .omitted, time: .shortened))–\($0.end.formatted(date: .omitted, time: .shortened))"
+        } + proposal.warnings
+        pendingReplan = ReplanProposal(
+            id: proposal.id,
+            title: proposal.title,
+            summary: proposal.summary,
+            changes: changes,
+            reason: proposal.reason,
+            proposedBlocks: proposed,
+            mode: .dayPlan,
+            sourceFingerprint: fingerprint
+        )
+        if ProcessInfo.processInfo.arguments.contains("-invalidate-agent-plan-proposal") {
+            blocks.append(ScheduleBlock(
+                title: "测试中的状态变化",
+                start: calendar.date(on: dayStart, hour: 6),
+                end: calendar.date(on: dayStart, hour: 6, minute: 5),
+                kind: .breakTime,
+                reason: "仅用于验证过期提案保护"
+            ))
+        }
+        return "我生成了一份今日计划候选。确认前不会写入时间线。"
+    }
+
+    private func proposedDayBlocksAreSafe(_ proposed: [ScheduleBlock], against occupied: [ScheduleBlock]) -> Bool {
+        guard !proposed.isEmpty else { return false }
+        for (index, block) in proposed.enumerated() {
+            guard block.kind == .focus, block.planItemID != nil, block.end > block.start else { return false }
+            if occupied.contains(where: { $0.state != .missed && $0.start < block.end && block.start < $0.end }) {
+                return false
+            }
+            if proposed.dropFirst(index + 1).contains(where: { $0.start < block.end && block.start < $0.end }) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func planningPreferences() -> AgentPlanDayRequest.Preferences {
+        let sleepRule = recurringSchedules.first(where: { $0.isSleep == true })
+        let preferredPeriods = planItems.compactMap(\.preferredPeriod)
+        let morningCount = preferredPeriods.filter { $0 == .morning }.count
+        let eveningCount = preferredPeriods.filter { $0 == .evening }.count
+        let total = max(1, preferredPeriods.count)
+        return AgentPlanDayRequest.Preferences(
+            preferredSleepTime: sleepRule.map { localTimeString(minutes: $0.startMinute) }
+                ?? onboardingProfile.map { localTimeString(date: $0.sleepTime) },
+            preferredWakeTime: sleepRule?.sleepEndMinute.map(localTimeString(minutes:))
+                ?? onboardingProfile.map { localTimeString(date: $0.wakeTime) },
+            preferredFocusMinutes: 50,
+            preferredBreakMinutes: 10,
+            morningStudyPreference: Double(morningCount) / Double(total),
+            eveningStudyPreference: Double(eveningCount) / Double(total)
+        )
+    }
+
+    private func localTimeString(minutes: Int) -> String {
+        String(format: "%02d:%02d", (minutes / 60) % 24, minutes % 60)
+    }
+
+    private func localTimeString(date: Date) -> String {
+        localTimeString(minutes: calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date))
+    }
+
+    private func localizedReason(_ codes: [String]) -> String {
+        if codes.contains("USER_REQUESTED_REPLAN") { return "根据你的临时状态缩短点名任务" }
+        if codes.contains("TASK_INCOMPLETE_REQUIRES_REALLOCATION") { return "因本次未完成，只调整受影响时段" }
+        if codes.contains("PREFERENCE_MATCH") { return "匹配你的专注时段偏好" }
+        if codes.contains("DEADLINE_AWARE") { return "结合截止时间安排" }
+        return "安排在今天最早可用的安全时段"
+    }
+
+    private func planningStateFingerprint() -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        var data = (try? encoder.encode(makeSnapshot())) ?? Data()
+        if let onboardingProfile, let profileData = try? encoder.encode(onboardingProfile) {
+            data.append(profileData)
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func agentReferenceDate(fallback: Date = .now) -> Date {
+        guard ProcessInfo.processInfo.arguments.contains("-ui-testing"),
+              let fixture = ProcessInfo.processInfo.environment["LAMP_AGENT_REFERENCE_DATE"],
+              let date = ISO8601DateFormatter().date(from: fixture) else { return fallback }
+        return date
     }
 
     func exportData() throws -> URL {
@@ -1126,6 +1716,86 @@ final class LampStore: ObservableObject {
         return Dictionary(grouping: result, by: \.id)
             .compactMap { $0.value.first }
             .sorted { $0.start < $1.start }
+    }
+
+    private func applyIncompleteReplanFixture() {
+        let day = calendar.startOfDay(for: .now)
+        let mathID = UUID(uuidString: "30000000-0000-4000-8000-000000000001")!
+        let englishID = UUID(uuidString: "30000000-0000-4000-8000-000000000002")!
+        planItems = [
+            PlanItem(
+                id: mathID, kind: .task, title: "复习高数", detail: "第二章",
+                importance: 5, deadline: calendar.date(byAdding: .day, value: 1, to: day),
+                estimatedMinutes: 60, remainingMinutes: 60, preferredPeriod: .evening
+            ),
+            PlanItem(
+                id: englishID, kind: .task, title: "复习英语", detail: "阅读",
+                importance: 3, deadline: calendar.date(byAdding: .day, value: 2, to: day),
+                estimatedMinutes: 50, remainingMinutes: 50, preferredPeriod: .evening
+            )
+        ]
+        blocks = [
+            ScheduleBlock(
+                id: UUID(uuidString: "30000000-0000-4000-8000-000000000003")!,
+                planItemID: mathID, title: "复习高数",
+                start: calendar.date(on: day, hour: 19), end: calendar.date(on: day, hour: 20),
+                kind: .focus, reason: "今晚优先复习", provenance: "Lamp"
+            ),
+            ScheduleBlock(
+                id: UUID(uuidString: "30000000-0000-4000-8000-000000000004")!,
+                planItemID: englishID, title: "复习英语",
+                start: calendar.date(on: day, hour: 20, minute: 10), end: calendar.date(on: day, hour: 21),
+                kind: .focus, reason: "按原计划复习", provenance: "Lamp"
+            ),
+            ScheduleBlock(
+                id: UUID(uuidString: "30000000-0000-4000-8000-000000000005")!,
+                title: "固定课程",
+                start: calendar.date(on: day, hour: 21, minute: 15), end: calendar.date(on: day, hour: 22),
+                kind: .fixed, reason: "外部固定日程", provenance: "Calendar"
+            )
+        ]
+        recurringSchedules = []
+        occurrenceOverrides = []
+    }
+
+    private func applyLanguageReplanFixture() {
+        let day = calendar.startOfDay(for: .now)
+        let mathID = UUID(uuidString: "50000000-0000-4000-8000-000000000001")!
+        let englishID = UUID(uuidString: "50000000-0000-4000-8000-000000000002")!
+        planItems = [
+            PlanItem(
+                id: mathID, kind: .task, title: "复习高数", detail: "第二章",
+                importance: 5, deadline: calendar.date(byAdding: .day, value: 1, to: day),
+                estimatedMinutes: 60, remainingMinutes: 60, preferredPeriod: .evening
+            ),
+            PlanItem(
+                id: englishID, kind: .task, title: "复习英语", detail: "阅读",
+                importance: 3, deadline: calendar.date(byAdding: .day, value: 2, to: day),
+                estimatedMinutes: 50, remainingMinutes: 50, preferredPeriod: .evening
+            )
+        ]
+        blocks = [
+            ScheduleBlock(
+                id: UUID(uuidString: "50000000-0000-4000-8000-000000000003")!,
+                planItemID: mathID, title: "复习高数",
+                start: calendar.date(on: day, hour: 20), end: calendar.date(on: day, hour: 21),
+                kind: .focus, reason: "今晚复习", provenance: "Lamp"
+            ),
+            ScheduleBlock(
+                id: UUID(uuidString: "50000000-0000-4000-8000-000000000004")!,
+                planItemID: englishID, title: "复习英语",
+                start: calendar.date(on: day, hour: 21, minute: 10), end: calendar.date(on: day, hour: 22),
+                kind: .focus, reason: "按原计划复习", provenance: "Lamp"
+            ),
+            ScheduleBlock(
+                id: UUID(uuidString: "50000000-0000-4000-8000-000000000005")!,
+                title: "固定课程",
+                start: calendar.date(on: day, hour: 22, minute: 15), end: calendar.date(on: day, hour: 23),
+                kind: .fixed, reason: "外部固定日程", provenance: "Calendar"
+            )
+        ]
+        recurringSchedules = []
+        occurrenceOverrides = []
     }
 
     private func fallbackWeeklyStart(in week: DateInterval) -> Date {

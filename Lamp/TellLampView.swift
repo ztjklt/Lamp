@@ -32,7 +32,7 @@ struct TellLampView: View {
     @State private var showingReplaceConfirmation = false
     @FocusState private var focused: Bool
 
-    private let suggestions = ["我今天很累", "明天下午 3 点开会", "我想系统学习 AI"]
+    private let suggestions = ["帮我安排今天", "我今天很累", "明天下午 3 点开会", "我想系统学习 AI"]
 
     var body: some View {
         NavigationStack {

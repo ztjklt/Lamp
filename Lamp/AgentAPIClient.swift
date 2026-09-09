@@ -92,6 +92,162 @@ enum AgentAPIClient {
         throw ClientError.invalidResponse
     }
 
+    static func planDay(_ body: AgentPlanDayRequest) async throws -> AgentPlanDayResponse {
+        let configuredURL = ProcessInfo.processInfo.environment["LAMP_AGENT_CORE_URL"]
+            .flatMap(URL.init(string:))
+        let endpoint = configuredURL ?? supabaseURL.appending(path: "functions/v1/plan-day")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(body)
+
+        for attempt in 0..<2 {
+            var request = URLRequest(url: endpoint, timeoutInterval: 35)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if configuredURL == nil {
+                let token = try await SupabaseAnonymousSession.shared.accessToken()
+                request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+            request.httpBody = encoded
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw ClientError.invalidResponse }
+                if http.statusCode == 200 {
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    let payload = try decoder.decode(AgentPlanDayResponse.self, from: data)
+                    guard payload.schemaVersion == 1,
+                          payload.requestId == body.requestId,
+                          payload.sourceFingerprint == body.sourceFingerprint,
+                          payload.commitRequired else {
+                        throw ClientError.invalidResponse
+                    }
+                    return payload
+                }
+                if attempt == 0, http.statusCode == 429 || http.statusCode >= 500 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                let payload = try? JSONDecoder().decode(APIErrorPayload.self, from: data)
+                throw ClientError.server(payload?.message ?? payload?.error ?? "规划服务暂时不可用")
+            } catch let error as ClientError {
+                throw error
+            } catch {
+                if attempt == 0 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                throw ClientError.network
+            }
+        }
+        throw ClientError.invalidResponse
+    }
+
+    static func replanIncomplete(_ body: AgentIncompleteReplanRequest) async throws -> AgentIncompleteReplanResponse {
+        let configuredURL = ProcessInfo.processInfo.environment["LAMP_AGENT_CORE_REPLAN_URL"]
+            .flatMap(URL.init(string:))
+        let endpoint = configuredURL ?? supabaseURL.appending(path: "functions/v1/replan-incomplete")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(body)
+
+        for attempt in 0..<2 {
+            var request = URLRequest(url: endpoint, timeoutInterval: 35)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if configuredURL == nil {
+                let token = try await SupabaseAnonymousSession.shared.accessToken()
+                request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+            request.httpBody = encoded
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw ClientError.invalidResponse }
+                if http.statusCode == 200 {
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    let payload = try decoder.decode(AgentIncompleteReplanResponse.self, from: data)
+                    guard payload.schemaVersion == 1,
+                          payload.eventId == body.eventId,
+                          payload.sourceFingerprint == body.sourceFingerprint,
+                          payload.commitRequired else {
+                        throw ClientError.invalidResponse
+                    }
+                    return payload
+                }
+                if attempt == 0, http.statusCode == 429 || http.statusCode >= 500 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                let payload = try? JSONDecoder().decode(APIErrorPayload.self, from: data)
+                throw ClientError.server(payload?.message ?? payload?.error ?? "重排服务暂时不可用")
+            } catch let error as ClientError {
+                throw error
+            } catch {
+                if attempt == 0 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                throw ClientError.network
+            }
+        }
+        throw ClientError.invalidResponse
+    }
+
+    static func replanLanguage(_ body: AgentLanguageReplanRequest) async throws -> AgentLanguageReplanResponse {
+        let configuredURL = ProcessInfo.processInfo.environment["LAMP_AGENT_CORE_LANGUAGE_URL"]
+            .flatMap(URL.init(string:))
+        let endpoint = configuredURL ?? supabaseURL.appending(path: "functions/v1/replan-language")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(body)
+
+        for attempt in 0..<2 {
+            var request = URLRequest(url: endpoint, timeoutInterval: 45)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if configuredURL == nil {
+                let token = try await SupabaseAnonymousSession.shared.accessToken()
+                request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+            request.httpBody = encoded
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw ClientError.invalidResponse }
+                if http.statusCode == 200 {
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    let payload = try decoder.decode(AgentLanguageReplanResponse.self, from: data)
+                    guard payload.schemaVersion == 1,
+                          payload.requestId == body.requestId,
+                          payload.sourceFingerprint == body.sourceFingerprint,
+                          payload.commitRequired else {
+                        throw ClientError.invalidResponse
+                    }
+                    return payload
+                }
+                if attempt == 0, http.statusCode == 429 || http.statusCode >= 500 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                let payload = try? JSONDecoder().decode(APIErrorPayload.self, from: data)
+                throw ClientError.server(payload?.message ?? payload?.error ?? "语言重排服务暂时不可用")
+            } catch let error as ClientError {
+                throw error
+            } catch {
+                if attempt == 0 {
+                    try await Task.sleep(for: .milliseconds(850))
+                    continue
+                }
+                throw ClientError.network
+            }
+        }
+        throw ClientError.invalidResponse
+    }
+
     static func analyzeScheduleImage(
         _ image: ImageIngestionService.PreparedImage,
         guidance: String = "",

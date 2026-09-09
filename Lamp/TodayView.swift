@@ -504,6 +504,7 @@ struct MissedTaskView: View {
     @Environment(\.dismiss) private var dismiss
     let block: ScheduleBlock
     @State private var reason = "临时有其他事情"
+    @State private var isSubmitting = false
 
     private let reasons = ["临时有其他事情", "精力不足", "预计时间不够", "任务不再需要"]
 
@@ -528,11 +529,25 @@ struct MissedTaskView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("查看重排") {
-                        store.proposeMissed(block, reason: reason)
-                        dismiss()
+                    Button {
+                        isSubmitting = true
+                        Task {
+                            do {
+                                try await store.proposeMissedWithAgent(block, reason: reason)
+                            } catch {
+                                store.toast = "未完成已记录，但暂时无法生成重排"
+                            }
+                            dismiss()
+                        }
+                    } label: {
+                        if isSubmitting {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("查看重排")
+                        }
                     }
                     .fontWeight(.semibold)
+                    .disabled(isSubmitting)
                     .accessibilityIdentifier("missed.submit")
                 }
             }

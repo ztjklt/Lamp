@@ -1,0 +1,18 @@
+{
+  "version": "phase-8-v1",
+  "caseCount": 105,
+  "minimumPassRate": 0.98,
+  "minimumCategoryPassRate": 0.95,
+  "referenceMetrics": {
+    "passRate": 1,
+    "categoryPassRates": {
+      "intent": 1,
+      "constraint": 1,
+      "deadline": 1,
+      "replanning": 1,
+      "stability": 1,
+      "safety": 1,
+      "tool": 1
+    }
+  }
+}
