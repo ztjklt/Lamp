@@ -6,11 +6,13 @@ import { ToolExecutor } from "../src/agent/tools/ToolExecutor.js";
 import { ToolRegistry } from "../src/agent/tools/ToolRegistry.js";
 import { ToolValidator } from "../src/agent/tools/ToolValidator.js";
 import { FixedClock } from "../src/infrastructure/clock/FixedClock.js";
+import { LampError } from "../src/errors/LampError.js";
 import { InMemoryAuditLogRepository } from "../src/infrastructure/repositories/InMemoryAuditLogRepository.js";
 import { InMemoryHistoryRepository } from "../src/infrastructure/repositories/InMemoryHistoryRepository.js";
 import { AuditLog } from "../src/observability/AuditLog.js";
 import { nullLogger } from "../src/observability/Logger.js";
 import { createReadTools } from "../src/tools/read/ReadTools.js";
+import { createMutationTools } from "../src/tools/mutation/MutationTools.js";
 import { fixtureIds, makeStateSnapshot } from "./fixtures/StateFixture.js";
 import { z } from "zod";
 
@@ -146,6 +148,41 @@ describe("Tool infrastructure", () => {
     });
   });
 
+  it("exposes the complete mutation set without a hard-delete tool", () => {
+    const tools = createMutationTools();
+    expect(tools.map((tool) => tool.name).sort()).toEqual([
+      "archive_task", "complete_task", "create_schedule_block", "create_task", "defer_task",
+      "lock_schedule_block", "move_schedule_block", "move_task", "remove_schedule_block",
+      "resize_schedule_block", "split_task", "unlock_schedule_block", "update_task",
+    ]);
+    expect(tools.every((tool) => tool.riskLevel === "MEDIUM_MUTATION")).toBe(true);
+    expect(tools.some((tool) => tool.name === "delete_task")).toBe(false);
+  });
+
+  it("turns a valid task mutation into confirmation_required without changing snapshot state", async () => {
+    const { registry, executor, context } = harness(["task:write"]);
+    for (const tool of createMutationTools()) registry.register(tool);
+    const before = structuredClone(context.state);
+
+    const result = await executor.execute(call("update_task", {
+      taskId: fixtureIds.task, expectedVersion: 1, changes: { title: "更新后的标题" },
+    }), context);
+
+    expect(result).toMatchObject({ status: "confirmation_required", policyDecision: { reasonCode: "MUTATION_REQUIRES_CONFIRMATION" } });
+    expect(context.state).toEqual(before);
+  });
+
+  it("rejects protected schedule records before presenting a confirmation", async () => {
+    const { registry, executor, context } = harness(["schedule:write"]);
+    for (const tool of createMutationTools()) registry.register(tool);
+
+    const result = await executor.execute(call("remove_schedule_block", {
+      blockId: fixtureIds.block, expectedVersion: 8,
+    }), context);
+
+    expect(result).toMatchObject({ status: "failed", error: { code: "POLICY_DENIED" } });
+  });
+
   it("requires confirmation before a registered medium-risk tool can execute", async () => {
     const { registry, executor, audits, context } = harness();
     let executed = false;
@@ -170,6 +207,33 @@ describe("Tool infrastructure", () => {
     expect((await audits.listByRun(fixtureIds.run))[0]).toMatchObject({
       status: "confirmation_required",
     });
+  });
+
+  it("checks mutation semantics before asking the user to confirm", async () => {
+    const { registry, executor, audits, context } = harness();
+    let executed = false;
+    registry.register(defineTool({
+      name: "protected_mutation_fixture",
+      version: 1,
+      description: "Test-only protected mutation boundary",
+      inputSchema: z.object({}).strict(),
+      outputSchema: z.object({ ok: z.boolean() }).strict(),
+      riskLevel: "MEDIUM_MUTATION",
+      requiredScopes: ["state:read"],
+      checkPreconditions: async () => {
+        throw new LampError({ code: "POLICY_DENIED", message: "protected record", safeMessage: "该记录不可修改。", statusCode: 403 });
+      },
+      execute: async () => {
+        executed = true;
+        return { ok: true };
+      },
+    }));
+
+    const result = await executor.execute(call("protected_mutation_fixture"), context);
+
+    expect(result).toMatchObject({ status: "failed", error: { code: "POLICY_DENIED" } });
+    expect(executed).toBe(false);
+    expect((await audits.listByRun(fixtureIds.run))[0]).toMatchObject({ status: "failed", errorCode: "POLICY_DENIED" });
   });
 
   it("rejects and audits output that violates the registered schema", async () => {

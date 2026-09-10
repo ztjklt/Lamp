@@ -64,6 +64,12 @@ export class ToolExecutor {
     }
     context.run?.addToolSelection(call.id, startedAt);
 
+    try {
+      await tool.checkPreconditions(input, context);
+    } catch (error) {
+      return this.finishFailure(call, tool.riskLevel, startedAt, context, asToolError(error));
+    }
+
     let decision: PolicyDecision;
     try {
       const evaluation = await this.policies.evaluateDetailed({ tool, input, context });
@@ -92,7 +98,6 @@ export class ToolExecutor {
       data: { toolName: tool.name, toolVersion: tool.version, riskLevel: tool.riskLevel },
     });
     try {
-      await tool.checkPreconditions(input, context);
       const rawOutput = await tool.execute(input, context);
       const output = this.validator.validateOutput(tool, rawOutput);
       if (!output || typeof output !== "object" || Array.isArray(output)) {

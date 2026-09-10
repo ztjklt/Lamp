@@ -76,6 +76,12 @@ const TraceSchema = z.object({
   intent: z.literal("replan_schedule"),
   decision: LanguageWorkloadDecisionSchema,
   diagnostics: z.array(z.string().max(500)).max(50),
+  usage: z.object({
+    inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(), cacheHitTokens: z.number().int().nonnegative(),
+    cacheMissTokens: z.number().int().nonnegative(),
+  }).strict(),
+  modelLatencyMs: z.number().int().nonnegative(),
 }).strict();
 
 const ResponseBase = z.object({

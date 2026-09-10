@@ -210,6 +210,8 @@ function toResponse(
     intent: "replan_schedule" as const,
     decision,
     diagnostics: result.diagnostics,
+    usage: model.usage,
+    modelLatencyMs: model.latencyMs,
   };
   const base = {
     schemaVersion: 1 as const,

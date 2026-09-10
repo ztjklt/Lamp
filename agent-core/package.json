@@ -18,6 +18,10 @@
   },
   "dependencies": {
     "@js-temporal/polyfill": "^0.5.1",
+    "@opentelemetry/auto-instrumentations-node": "^0.80.0",
+    "@opentelemetry/exporter-metrics-otlp-proto": "^0.222.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.222.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
     "zod": "^4.1.5"
   },
   "devDependencies": {
