@@ -183,6 +183,8 @@ struct PrivacyDataView: View {
     @State private var exportError: String?
     @State private var showingClearConfirmation = false
     @State private var showingDeleteConfirmation = false
+    @State private var showingAccountDeleteConfirmation = false
+    @StateObject private var account = AccountService.shared
 
     var body: some View {
         NavigationStack {
@@ -207,6 +209,13 @@ struct PrivacyDataView: View {
                         .accessibilityIdentifier("privacy.shareExport")
                     }
 
+                    Button("准备云端数据导出", systemImage: "icloud.and.arrow.down") {
+                        Task {
+                            do { exportURL = try await account.exportCloudData(); exportError = nil }
+                            catch { exportError = error.localizedDescription }
+                        }
+                    }
+
                     Button {
                         showingClearConfirmation = true
                     } label: {
@@ -220,6 +229,51 @@ struct PrivacyDataView: View {
                         Label("删除本机 Lamp 数据", systemImage: "trash")
                     }
                     .accessibilityIdentifier("privacy.deleteLocal")
+                }
+
+                if !store.syncConflicts.isEmpty {
+                    Section {
+                        ForEach(store.syncConflicts) { conflict in
+                            SyncConflictRow(conflict: conflict) { useRemote in
+                                store.resolveSyncConflict(conflict, useRemote: useRemote)
+                            }
+                        }
+                    } header: {
+                        Text("合并预览")
+                    } footer: {
+                        Text("固定日程、已完成记录和删除冲突不会被自动覆盖；请逐项选择。")
+                    }
+                }
+
+                Section("账户与同步") {
+                    Button {
+                        Task {
+                            do { try await account.upgradeAnonymousToApple() }
+                            catch { exportError = error.localizedDescription }
+                        }
+                    } label: {
+                        Label("使用 Apple 登录并保留数据", systemImage: "apple.logo")
+                    }
+
+                    Text(account.statusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Button("立即同步", systemImage: "arrow.triangle.2.circlepath") {
+                        Task { _ = await store.synchronize() }
+                    }
+                    Button("退出登录", systemImage: "rectangle.portrait.and.arrow.right") {
+                        Task {
+                            await account.signOut()
+                            store.deleteAllLocalData()
+                            dismiss()
+                        }
+                    }
+                    Button(role: .destructive) {
+                        showingAccountDeleteConfirmation = true
+                    } label: {
+                        Label("删除账户与云端数据", systemImage: "person.crop.circle.badge.minus")
+                    }
                 }
 
                 if let exportError {
@@ -245,7 +299,7 @@ struct PrivacyDataView: View {
                 }
 
                 Section {
-                    Label("Supabase 云同步尚未启用，因此这里不会显示虚假的云端删除入口。", systemImage: "icloud.slash")
+                    Label("Supabase 是权威数据源；本机 SwiftData 用作离线缓存，冲突不会静默覆盖。", systemImage: "checkmark.icloud")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
@@ -269,8 +323,66 @@ struct PrivacyDataView: View {
             } message: {
                 Text("这会删除本机计划、记忆、规则和引导设置，且无法撤销。")
             }
+            .alert("删除账户与全部云端数据？", isPresented: $showingAccountDeleteConfirmation) {
+                Button("永久删除", role: .destructive) {
+                    Task {
+                        do {
+                            try await account.deleteAccount()
+                            store.deleteAllLocalData()
+                            dismiss()
+                        } catch {
+                            exportError = error.localizedDescription
+                        }
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("这会删除业务数据、记忆、运行记录、审计、对象存储内容和登录身份。此操作不可撤销。")
+            }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+private struct SyncConflictRow: View {
+    let conflict: SyncConflictPreview
+    let resolve: (Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(conflict.entityLabel, systemImage: "arrow.triangle.branch")
+                .font(.headline)
+            Text(versionSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("保留本机") { resolve(false) }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Button("采用云端") { resolve(true) }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var versionSummary: String {
+        "本机版本 \(conflict.localVersion) · 云端版本 \(conflict.remoteVersion)"
+    }
+}
+
+private extension SyncConflictPreview {
+    var entityLabel: String {
+        switch entityType {
+        case "plan_node": "任务冲突"
+        case "schedule_block": "日程冲突"
+        case "memory": "记忆冲突"
+        case "planning_rule": "规划规则冲突"
+        case "temporary_state": "临时状态冲突"
+        case "recurring_rule": "重复日程冲突"
+        case "occurrence_override": "单次日程调整冲突"
+        default: "数据冲突"
+        }
     }
 }
 

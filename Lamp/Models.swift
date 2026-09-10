@@ -476,6 +476,12 @@ struct ReplanProposal: Identifiable, Codable, Hashable, Sendable {
     var sourceEventID: UUID?
     var affectedBlockIDs: [UUID] = []
     var temporaryStateTitle: String?
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
+    var confirmationIdempotencyKey: UUID = UUID()
+    var proposedRecurringRule: RecurringScheduleRule?
 }
 
 struct AgentPlanDayRequest: Encodable, Sendable {
@@ -564,6 +570,10 @@ struct AgentPlanDayResponse: Decodable, Sendable {
     var commitRequired: Bool
     var proposal: Proposal?
     var diagnostics: [String]
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
 }
 
 struct AgentIncompleteReplanRequest: Encodable, Sendable {
@@ -618,6 +628,10 @@ struct AgentIncompleteReplanResponse: Decodable, Sendable {
     var commitRequired: Bool
     var proposal: Proposal?
     var diagnostics: [String]
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
 }
 
 struct AgentLanguageReplanRequest: Encodable, Sendable {
@@ -678,6 +692,10 @@ struct AgentLanguageReplanResponse: Decodable, Sendable {
     var commitRequired: Bool
     var proposal: Proposal?
     var trace: Trace
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
 }
 
 struct WeeklyScheduleProposal: Identifiable, Hashable, Sendable {
@@ -686,6 +704,13 @@ struct WeeklyScheduleProposal: Identifiable, Hashable, Sendable {
     var weekStart: Date
     var suggestedBlocks: [ScheduleBlock]
     var warnings: [String]
+}
+
+struct PlanItemProposal: Identifiable, Hashable, Sendable {
+    var id: UUID = UUID()
+    var item: PlanItem
+    var title: String
+    var summary: String
 }
 
 struct SchedulePeriodSummary: Equatable, Sendable {

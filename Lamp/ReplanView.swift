@@ -48,7 +48,11 @@ struct ReplanView: View {
                                 Button(keepButtonTitle(for: proposal.mode)) { store.dismissPendingReplan(); dismiss() }
                                     .buttonStyle(.lamp).frame(maxWidth: .infinity)
                                     .accessibilityIdentifier("replan.keep")
-                                Button(applyButtonTitle(for: proposal.mode)) { store.applyPendingReplan(); dismiss() }
+                                Button(applyButtonTitle(for: proposal.mode)) {
+                                    Task {
+                                        if await store.applyPendingReplan() { dismiss() }
+                                    }
+                                }
                                     .buttonStyle(.lampProminent).frame(maxWidth: .infinity)
                                     .accessibilityIdentifier("replan.apply")
                             }
@@ -96,5 +100,45 @@ struct ReplanView: View {
         case .languageReplan: "语言调整预览"
         case .adjustment, nil: "调整预览"
         }
+    }
+}
+
+struct PlanItemConfirmationView: View {
+    @EnvironmentObject private var store: LampStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let proposal = store.pendingPlanItem {
+                    Section(proposal.title) {
+                        Text(proposal.item.title).font(.headline)
+                        if !proposal.item.detail.isEmpty {
+                            Text(proposal.item.detail).foregroundStyle(.secondary)
+                        }
+                        Text(proposal.summary).font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Section("计划范围") {
+                        LabeledContent("类型", value: proposal.item.kind == .goal ? "年度目标" : "月度里程碑")
+                        LabeledContent("预计投入", value: "\(proposal.item.estimatedMinutes) 分钟")
+                    }
+                } else {
+                    ContentUnavailableView("预览已失效", systemImage: "doc.badge.exclamationmark")
+                }
+            }
+            .navigationTitle("写入确认")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { store.dismissPendingPlanItem(); dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("确认写入") { store.applyPendingPlanItem(); dismiss() }
+                        .fontWeight(.semibold)
+                        .accessibilityIdentifier("planItemPreview.apply")
+                }
+            }
+        }
+        .interactiveDismissDisabled()
     }
 }

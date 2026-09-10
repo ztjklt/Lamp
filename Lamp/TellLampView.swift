@@ -536,7 +536,10 @@ struct TellLampView: View {
             }
             phase = .answered
             text = ""
-            if store.pendingReplan != nil || store.pendingWeeklySchedule != nil { dismiss() }
+            if store.pendingReplan != nil || store.pendingWeeklySchedule != nil || store.pendingPlanItem != nil {
+                try? await Task.sleep(for: .milliseconds(650))
+                dismiss()
+            }
         }
     }
 

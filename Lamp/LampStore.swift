@@ -1,5 +1,8 @@
 import Foundation
 import CryptoKit
+import SwiftData
+import Security
+import OSLog
 import UserNotifications
 
 @MainActor
@@ -14,25 +17,39 @@ final class LampStore: ObservableObject {
     @Published var highlightedBlockIDs: Set<UUID> = []
     @Published var pendingReplan: ReplanProposal?
     @Published var pendingWeeklySchedule: WeeklyScheduleProposal?
+    @Published var pendingPlanItem: PlanItemProposal?
+    @Published private(set) var syncConflicts: [SyncConflictPreview] = []
     @Published var toast: String?
     @Published var undoTransaction: LampUndoTransaction?
     @Published var hasCompletedOnboarding: Bool
     @Published var onboardingProfile: OnboardingProfile?
+    @Published private(set) var cloudStateVersion = UserDefaults.standard.integer(forKey: "lamp.cloud.state-version")
 
     private let calendar: Calendar
     private let persistenceURL: URL
+    private let localStore: any LocalStore
+    private var syncEngine: (any SyncEngine)?
+    private let syncLogger = Logger(subsystem: "com.lamp.planner", category: "sync")
     private let profileKey = "lamp.onboarding.profile"
     private var clarificationInput: String?
 
-    init(calendar: Calendar = .current) {
+    init(calendar: Calendar = .current, localStore injectedLocalStore: (any LocalStore)? = nil) {
         self.calendar = calendar
         self.hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "lamp.onboarding.complete")
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         self.persistenceURL = base.appendingPathComponent("Lamp/snapshot.json")
+        let databaseURL = base.appendingPathComponent("Lamp/Lamp.store")
+        self.localStore = injectedLocalStore
+            ?? (try? SwiftDataLocalStore(databaseURL: databaseURL, legacyJSONURL: self.persistenceURL))
+            ?? LegacyJSONLocalStore(url: self.persistenceURL)
+        if let syncedStore = self.localStore as? any LocalStore & OutboxStore {
+            self.syncEngine = OutboxSyncEngine(localStore: syncedStore, transport: SupabaseSyncTransport())
+        }
         if let data = UserDefaults.standard.data(forKey: profileKey) {
             self.onboardingProfile = try? JSONDecoder().decode(OnboardingProfile.self, from: data)
         }
         load()
+        syncConflicts = (try? localStore.pendingConflicts()) ?? []
 
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
             apply(DemoData.snapshot(calendar: calendar))
@@ -66,6 +83,10 @@ final class LampStore: ObservableObject {
         if ProcessInfo.processInfo.arguments.contains("-mock-incomplete-replan-scenario"),
            let math = todayBlocks.first(where: { $0.title == "复习高数" && $0.state == .planned }) {
             return math
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"),
+           let editable = todayBlocks.first(where: { $0.kind == .focus && $0.state == .planned }) {
+            return editable
         }
         let now = Date.now
         return todayBlocks.first(where: { $0.start <= now && $0.end > now && $0.state == .planned })
@@ -361,7 +382,7 @@ final class LampStore: ObservableObject {
             },
             preferences: planningPreferences()
         )
-        let response = try await AgentAPIClient.replanIncomplete(request)
+        let response = try await AgentAPIClient.replanIncomplete(request, expectedStateVersion: cloudStateVersion)
         guard response.status == "proposal", let proposal = response.proposal,
               proposal.sourceEventId == eventID else {
             pendingReplan = nil
@@ -412,7 +433,11 @@ final class LampStore: ObservableObject {
             mode: .incompleteTask,
             sourceFingerprint: fingerprint,
             sourceEventID: eventID,
-            affectedBlockIDs: affectedBlockIDs
+            affectedBlockIDs: affectedBlockIDs,
+            previewHash: response.previewHash,
+            confirmationToken: response.confirmationToken,
+            expectedStateVersion: response.expectedStateVersion,
+            expiresAt: response.expiresAt
         )
         if arguments.contains("-invalidate-agent-replan-proposal") {
             let changedDay = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
@@ -871,15 +896,13 @@ final class LampStore: ObservableObject {
             )
         }
 
-        beginTransaction("已撤销新增事项")
         let title = inferredTitle(from: normalized)
         let deadline = normalized.contains("明天") ? calendar.date(byAdding: .day, value: 1, to: .now) : nil
-        let item = PlanItem(kind: .task, title: title, detail: normalized, importance: deadline == nil ? 3 : 5, deadline: deadline, estimatedMinutes: 60)
-        planItems.append(item)
-        addToNextAvailableSlot(item)
-        toast = "已加入计划"
-        save()
-        return "已把“\(title)”加入计划，并放进了下一个合适的空档。"
+        proposeWeeklyPlan(
+            title: title, detail: normalized, importance: deadline == nil ? 3 : 5,
+            weekContaining: .now, deadline: deadline, estimatedMinutes: 60
+        )
+        return "已为“\(title)”生成任务与候选时段；确认前不会写入。"
     }
 
     func processWithAgent(input: String) async throws -> String {
@@ -912,7 +935,6 @@ final class LampStore: ObservableObject {
                   (0..<1440).contains(start), (0..<1440).contains(end), start != end else {
                 return "请告诉我每晚几点睡、早上几点起床。"
             }
-            beginTransaction("已撤销睡眠安排")
             let existing = recurringSchedules.first(where: { $0.isSleep == true })
             var rule = RecurringScheduleRule(
                 title: "睡眠", detail: input,
@@ -926,31 +948,35 @@ final class LampStore: ObservableObject {
             rule.isSleep = true
             rule.sleepEndMinute = end
             rule.startDayOffset = start < 720 ? 1 : 0
-            if let existing {
-                rule.id = existing.id
-                recurringSchedules.removeAll { $0.id == existing.id }
-            }
-            recurringSchedules.append(rule)
+            if let existing { rule.id = existing.id }
             let horizon = DateInterval(start: calendar.startOfDay(for: .now), end: calendar.date(byAdding: .day, value: 14, to: .now)!)
             let occupied = expandedBlocks(in: horizon)
-            let sleeps = occupied.filter { $0.isSleep == true }
+            let sleeps = (0..<14).compactMap { offset -> ScheduleBlock? in
+                guard let day = calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: .now)) else { return nil }
+                return RecurringScheduleEngine.occurrence(for: rule, on: day, override: nil, calendar: calendar)
+            }
             let conflicts = blocks.filter { block in sleeps.contains { $0.start < block.end && block.start < $0.end } }
+            var proposedBlocks = blocks
             if !conflicts.isEmpty {
                 let movable = conflicts.filter { $0.kind == .focus && $0.planItemID != nil }
                 let ids = Set(movable.map(\.id))
                 let items = planItems.filter { item in movable.contains { $0.planItemID == item.id } }
                 let generated = PlanningEngine(calendar: calendar).makeSchedule(
-                    items: items, fixed: occupied.filter { !ids.contains($0.id) },
+                    items: items, fixed: occupied.filter { !ids.contains($0.id) && $0.isSleep != true } + sleeps,
                     context: PlanningContext(horizonStart: .now, horizonEnd: horizon.end)
                 )
                 let moved = generated.filter { block in items.contains { $0.id == block.planItemID } }
-                pendingReplan = ReplanProposal(title: "睡眠与已有日程冲突", summary: "睡眠已保存。请检查调整方案；固定日程需要手动处理。",
-                    changes: conflicts.map { "“\($0.title)”与睡眠重叠" }, reason: "睡眠保护时段",
-                    proposedBlocks: blocks.filter { !ids.contains($0.id) } + moved)
+                proposedBlocks = blocks.filter { !ids.contains($0.id) } + moved
             }
-            save()
-            toast = "已保存每晚睡眠安排，可撤销"
-            return "已从今晚开始设置重复睡眠，显示在每天时间线末尾。"
+            pendingReplan = ReplanProposal(
+                title: conflicts.isEmpty ? "设置每晚睡眠" : "睡眠与已有日程冲突",
+                summary: conflicts.isEmpty ? "将从今晚开始建立重复睡眠时段。" : "请检查需要移动的专注时段；固定日程不会自动修改。",
+                changes: conflicts.isEmpty ? ["每天新增“睡眠”保护时段"] : conflicts.map { "“\($0.title)”与睡眠重叠" },
+                reason: "睡眠保护时段", proposedBlocks: proposedBlocks,
+                proposedRecurringRule: rule
+            )
+            if arguments.contains("-mock-sleep-directive") { applyPendingReplanLocally() }
+            return "已生成睡眠安排候选；确认前不会修改日程。"
         case "set_temporary_state":
             proposeFatigueReplan()
             return "知道了。这只作为临时状态处理。我准备了一份更轻的计划，请先确认。"
@@ -971,20 +997,14 @@ final class LampStore: ObservableObject {
                     importance: directive.arguments.importance ?? (scope == .week ? 4 : 5)
                 )
             }
-            beginTransaction("已撤销新增事项")
-            let item = PlanItem(
-                kind: .task,
-                title: title,
-                detail: directive.arguments.detail ?? input,
+            proposeWeeklyPlan(
+                title: title, detail: directive.arguments.detail ?? input,
                 importance: directive.arguments.importance ?? (directive.arguments.deadlineHint == nil ? 3 : 5),
+                weekContaining: .now,
                 deadline: parsedDate(directive.arguments.deadline ?? directive.arguments.deadlineHint),
                 estimatedMinutes: minutes
             )
-            planItems.append(item)
-            addToNextAvailableSlot(item)
-            toast = "DeepSeek 已理解并加入计划"
-            save()
-            return "已把“\(title)”转成 \(minutes) 分钟的行动，并安排到合适空档。"
+            return "已把“\(title)”整理为任务与候选时段；确认前不会写入。"
         default:
             return process(input: input)
         }
@@ -1011,7 +1031,54 @@ final class LampStore: ObservableObject {
         )
     }
 
-    func applyPendingReplan() {
+    func applyPendingReplan() async -> Bool {
+        guard let proposal = pendingReplan else { return false }
+        if proposal.mode != .adjustment,
+           proposal.sourceFingerprint != nil,
+           proposal.sourceFingerprint != planningStateFingerprint() {
+            pendingReplan = nil
+            toast = staleProposalMessage(for: proposal.mode)
+            return false
+        }
+        if let expiresAt = proposal.expiresAt, expiresAt <= .now {
+            pendingReplan = nil
+            toast = "调整方案已过期，请重新生成"
+            return false
+        }
+        if let previewHash = proposal.previewHash,
+           let confirmationToken = proposal.confirmationToken,
+           let expectedVersion = proposal.expectedStateVersion {
+            do {
+                cloudStateVersion = try await AgentAPIClient.confirmProposal(
+                    id: proposal.id, previewHash: previewHash, confirmationToken: confirmationToken,
+                    expectedStateVersion: expectedVersion, idempotencyKey: proposal.confirmationIdempotencyKey
+                )
+                UserDefaults.standard.set(cloudStateVersion, forKey: "lamp.cloud.state-version")
+                guard await synchronize() else {
+                    toast = "云端已确认，等待网络恢复后同步到本机"
+                    return false
+                }
+                if let state = proposal.temporaryStateTitle {
+                    temporaryStates.append(TemporaryState(
+                        title: state,
+                        expiresAt: calendar.date(byAdding: .day, value: 1, to: .now)!,
+                        workloadMultiplier: 0.55
+                    ))
+                    save()
+                }
+                pendingReplan = nil
+                toast = "方案已确认并同步"
+                return true
+            } catch {
+                toast = error.localizedDescription
+                return false
+            }
+        }
+        applyPendingReplanLocally()
+        return true
+    }
+
+    private func applyPendingReplanLocally() {
         guard let proposal = pendingReplan else { return }
         if proposal.mode == .languageReplan {
             guard proposal.sourceFingerprint == planningStateFingerprint() else {
@@ -1089,6 +1156,10 @@ final class LampStore: ObservableObject {
         }
         beginTransaction("已恢复调整前的计划")
         blocks = proposal.proposedBlocks
+        if let rule = proposal.proposedRecurringRule {
+            recurringSchedules.removeAll { $0.id == rule.id || $0.isSleep == true }
+            recurringSchedules.append(rule)
+        }
         if proposal.reason.contains("疲惫") {
             temporaryStates.append(TemporaryState(
                 title: "疲惫",
@@ -1102,8 +1173,12 @@ final class LampStore: ObservableObject {
     }
 
     func dismissPendingReplan() {
-        let mode = pendingReplan?.mode
+        let proposal = pendingReplan
+        let mode = proposal?.mode
         pendingReplan = nil
+        if let proposal, proposal.confirmationToken != nil {
+            Task { try? await AgentAPIClient.rejectProposal(id: proposal.id) }
+        }
         if mode == .incompleteTask {
             toast = "未完成已记录，后续计划保持不变"
         } else if mode == .languageReplan {
@@ -1195,7 +1270,7 @@ final class LampStore: ObservableObject {
             },
             preferences: planningPreferences()
         )
-        let response = try await AgentAPIClient.replanLanguage(request)
+        let response = try await AgentAPIClient.replanLanguage(request, expectedStateVersion: cloudStateVersion)
         guard response.trace.intent == "replan_schedule",
               response.trace.decision.intent == "replan_schedule",
               response.trace.decision.action == "reduce_task_workload",
@@ -1252,7 +1327,11 @@ final class LampStore: ObservableObject {
             mode: .languageReplan,
             sourceFingerprint: fingerprint,
             affectedBlockIDs: affectedBlockIDs,
-            temporaryStateTitle: "疲惫"
+            temporaryStateTitle: "疲惫",
+            previewHash: response.previewHash,
+            confirmationToken: response.confirmationToken,
+            expectedStateVersion: response.expectedStateVersion,
+            expiresAt: response.expiresAt
         )
         if ProcessInfo.processInfo.arguments.contains("-invalidate-agent-language-proposal") {
             let changedDay = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
@@ -1342,7 +1421,7 @@ final class LampStore: ObservableObject {
             },
             preferences: planningPreferences()
         )
-        let response = try await AgentAPIClient.planDay(request)
+        let response = try await AgentAPIClient.planDay(request, expectedStateVersion: cloudStateVersion)
         guard response.status == "proposal", let proposal = response.proposal else {
             return response.diagnostics.first ?? "今天没有足够的可用时间容纳待安排任务。"
         }
@@ -1375,7 +1454,11 @@ final class LampStore: ObservableObject {
             reason: proposal.reason,
             proposedBlocks: proposed,
             mode: .dayPlan,
-            sourceFingerprint: fingerprint
+            sourceFingerprint: fingerprint,
+            previewHash: response.previewHash,
+            confirmationToken: response.confirmationToken,
+            expectedStateVersion: response.expectedStateVersion,
+            expiresAt: response.expiresAt
         )
         if ProcessInfo.processInfo.arguments.contains("-invalidate-agent-plan-proposal") {
             blocks.append(ScheduleBlock(
@@ -1480,8 +1563,44 @@ final class LampStore: ObservableObject {
         return removed
     }
 
+    @discardableResult
+    func synchronize() async -> Bool {
+        guard !ProcessInfo.processInfo.arguments.contains("-ui-testing") else { return false }
+        guard let syncEngine else { return false }
+        do {
+            let result = try await syncEngine.synchronize()
+            syncConflicts = result.conflicts
+            if let snapshot = try localStore.loadSnapshot() { apply(snapshot) }
+            if !result.conflicts.isEmpty {
+                toast = "发现 \(result.conflicts.count) 项云端冲突，请在合并预览中选择"
+            }
+            if let remoteVersion = try? await AgentAPIClient.fetchStateVersion() {
+                cloudStateVersion = remoteVersion
+                UserDefaults.standard.set(remoteVersion, forKey: "lamp.cloud.state-version")
+            }
+            syncLogger.info("sync completed pushed=\(result.pushed, privacy: .public) pulled=\(result.pulled, privacy: .public) conflicts=\(result.conflicts.count, privacy: .public)")
+            return true
+        } catch {
+            syncLogger.error("sync failed code=SYNC_UNAVAILABLE")
+            return false
+        }
+    }
+
+    func resolveSyncConflict(_ conflict: SyncConflictPreview, useRemote: Bool) {
+        do {
+            try localStore.resolveConflict(id: conflict.id, useRemote: useRemote)
+            syncConflicts = try localStore.pendingConflicts()
+            if let snapshot = try localStore.loadSnapshot() { apply(snapshot) }
+            toast = useRemote ? "已采用云端版本" : "已保留本机版本，将在下次联网时提交"
+            Task { _ = await synchronize() }
+        } catch {
+            syncLogger.error("conflict resolution failed code=SYNC_RESOLUTION_FAILED")
+            toast = "冲突处理失败，本机和云端数据均未覆盖"
+        }
+    }
+
     func deleteAllLocalData() {
-        try? FileManager.default.removeItem(at: persistenceURL)
+        try? localStore.deleteAll()
         planItems = []
         blocks = []
         memories = []
@@ -1492,6 +1611,8 @@ final class LampStore: ObservableObject {
         highlightedBlockIDs = []
         pendingReplan = nil
         pendingWeeklySchedule = nil
+        pendingPlanItem = nil
+        syncConflicts = []
         undoTransaction = nil
         onboardingProfile = nil
         hasCompletedOnboarding = false
@@ -1603,49 +1724,62 @@ final class LampStore: ObservableObject {
             )
             return "已为“\(title)”生成本周候选时段，请确认后再写入时间线。"
         case .month:
-            createPlanItem(
-                title: title,
-                detail: detail,
-                importance: importance,
-                timeframe: .month,
-                anchorDate: anchorDate,
-                deadline: deadline,
-                estimatedMinutes: estimatedMinutes
-            )
-            return "已把“\(title)”加入本月里程碑。"
+            proposePlanItem(title: title, detail: detail, importance: importance, timeframe: .month,
+                            anchorDate: anchorDate, deadline: deadline, estimatedMinutes: estimatedMinutes)
+            return "已生成“\(title)”本月里程碑候选，请确认后写入。"
         case .year:
-            createPlanItem(
-                title: title,
-                detail: detail,
-                importance: importance,
-                timeframe: .year,
-                anchorDate: anchorDate,
-                deadline: deadline,
-                estimatedMinutes: estimatedMinutes
-            )
-            return "已把“\(title)”加入年度目标，并同步到路线。"
+            proposePlanItem(title: title, detail: detail, importance: importance, timeframe: .year,
+                            anchorDate: anchorDate, deadline: deadline, estimatedMinutes: estimatedMinutes)
+            return "已生成“\(title)”年度目标候选，请确认后写入。"
         }
     }
 
-    private func addToNextAvailableSlot(_ item: PlanItem) {
-        let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now))!
-        let context = PlanningContext(
-            horizonStart: calendar.date(on: startOfTomorrow, hour: 9),
-            horizonEnd: calendar.date(byAdding: .day, value: 7, to: startOfTomorrow)!
+    private func proposePlanItem(
+        title: String, detail: String, importance: Int, timeframe: PlanTimeframe,
+        anchorDate: Date, deadline: Date?, estimatedMinutes: Int
+    ) {
+        let item = PlanItem(
+            kind: timeframe == .year ? .goal : .milestone,
+            title: title, detail: detail, importance: min(5, max(1, importance)),
+            deadline: deadline, estimatedMinutes: max(20, estimatedMinutes),
+            isSplittable: false, planningPeriod: normalizedPeriod(timeframe, containing: anchorDate)
         )
-        let scheduled = PlanningEngine(calendar: calendar).makeSchedule(items: [item], fixed: expandedBlocks(in: DateInterval(start: context.horizonStart, end: context.horizonEnd)), context: context)
-        if let newBlock = scheduled.first(where: { $0.planItemID == item.id }) {
-            blocks.append(newBlock)
+        pendingPlanItem = PlanItemProposal(
+            item: item,
+            title: timeframe == .year ? "年度目标预览" : "里程碑预览",
+            summary: "只有点击确认后，这项内容才会写入路线。"
+        )
+    }
+
+    func applyPendingPlanItem() {
+        guard let proposal = pendingPlanItem else { return }
+        beginTransaction("已撤销新增路线计划")
+        planItems.append(proposal.item)
+        pendingPlanItem = nil
+        toast = "已确认并加入路线"
+        save()
+    }
+
+    func dismissPendingPlanItem() {
+        pendingPlanItem = nil
+        toast = "未保存这项路线计划"
+    }
+
+    private func staleProposalMessage(for mode: ReplanProposalMode) -> String {
+        switch mode {
+        case .dayPlan: "任务或日程已变化，请重新生成计划"
+        case .incompleteTask: "任务或日程已变化，请重新生成重排"
+        case .languageReplan: "任务或日程已变化，请重新生成调整方案"
+        case .adjustment: "任务或日程已变化，请重新生成方案"
         }
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: persistenceURL),
-              let snapshot = try? JSONDecoder().decode(LampSnapshot.self, from: data) else {
+        if let snapshot = try? localStore.loadSnapshot() {
+            apply(snapshot)
+        } else {
             apply(DemoData.snapshot(calendar: calendar))
-            return
         }
-        apply(snapshot)
     }
 
     private func apply(_ snapshot: LampSnapshot) {
@@ -1673,9 +1807,11 @@ final class LampStore: ObservableObject {
 
     private func save() {
         guard !ProcessInfo.processInfo.arguments.contains("-ui-testing") else { return }
-        guard let data = try? JSONEncoder().encode(makeSnapshot()) else { return }
-        try? FileManager.default.createDirectory(at: persistenceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: persistenceURL, options: .atomic)
+        do {
+            try localStore.saveSnapshotAndEnqueueChanges(makeSnapshot())
+        } catch {
+            toast = "本地保存失败，当前修改尚未持久化"
+        }
     }
 
     private func requestAndScheduleMorningBrief() {
@@ -1821,5 +1957,662 @@ final class LampStore: ObservableObject {
         case (nil, _?): return false
         case (nil, nil): return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }
+    }
+}
+
+@MainActor
+protocol LocalStore: AnyObject {
+    func loadSnapshot() throws -> LampSnapshot?
+    func saveSnapshotAndEnqueueChanges(_ snapshot: LampSnapshot) throws
+    func deleteAll() throws
+    func currentSyncCursor() throws -> Int64
+    func mergeRemoteChanges(_ changes: [RemoteSyncChange], forceConflicts: Bool) throws -> [SyncConflictPreview]
+    func pendingConflicts() throws -> [SyncConflictPreview]
+    func resolveConflict(id: UUID, useRemote: Bool) throws
+}
+
+@MainActor
+protocol OutboxStore: AnyObject {
+    func pendingOutbox(limit: Int, now: Date) throws -> [LocalOutboxMutation]
+    func acknowledgeOutbox(ids: [UUID]) throws
+    func deferOutbox(id: UUID, retryAt: Date, errorCode: String) throws
+}
+
+@MainActor
+protocol SyncEngine: AnyObject {
+    func synchronize() async throws -> SyncResult
+}
+
+@MainActor
+protocol SyncTransport: AnyObject {
+    func push(_ mutations: [LocalOutboxMutation]) async throws
+    func pull(after cursor: Int64, limit: Int) async throws -> [RemoteSyncChange]
+}
+
+struct RemoteSyncChange: Sendable, Equatable {
+    var cursor: Int64
+    var entityType: String
+    var entityID: UUID
+    var entityVersion: Int
+    var operation: String
+    var payload: Data?
+    var clientMutationID: UUID
+}
+
+struct SyncResult: Sendable, Equatable {
+    var pushed: Int
+    var pulled: Int
+    var conflicts: [SyncConflictPreview]
+}
+
+struct SyncConflictPreview: Identifiable, Sendable, Equatable {
+    var id: UUID
+    var entityType: String
+    var entityID: UUID
+    var localVersion: Int
+    var remoteVersion: Int
+    var requiresManualChoice: Bool
+}
+
+struct LocalOutboxMutation: Identifiable, Sendable, Equatable {
+    var id: UUID
+    var clientMutationID: UUID
+    var deviceID: UUID
+    var entityType: String
+    var entityID: UUID
+    var entityVersion: Int
+    var operation: String
+    var contentHash: String
+    var payload: Data?
+    var attemptCount: Int
+    var nextAttemptAt: Date
+}
+
+@Model
+private final class LocalSnapshotRecord {
+    @Attribute(.unique) var key: String
+    var payload: Data
+    var updatedAt: Date
+
+    init(payload: Data, updatedAt: Date = .now) {
+        self.key = "current"
+        self.payload = payload
+        self.updatedAt = updatedAt
+    }
+}
+
+@Model
+private final class LocalEntityRecord {
+    @Attribute(.unique) var key: String
+    var entityType: String
+    var entityID: UUID
+    var version: Int
+    var payload: Data?
+    var contentHash: String
+    var updatedAt: Date
+    var deletedAt: Date?
+
+    init(entityType: String, entityID: UUID, payload: Data, contentHash: String) {
+        self.key = "\(entityType):\(entityID.uuidString.lowercased())"
+        self.entityType = entityType
+        self.entityID = entityID
+        self.version = 1
+        self.payload = payload
+        self.contentHash = contentHash
+        self.updatedAt = .now
+    }
+}
+
+@Model
+private final class LocalOutboxRecord {
+    @Attribute(.unique) var id: UUID
+    @Attribute(.unique) var clientMutationID: UUID
+    var deviceID: UUID
+    var entityType: String
+    var entityID: UUID
+    var entityVersion: Int
+    var operation: String
+    var contentHash: String
+    var payload: Data?
+    var attemptCount: Int
+    var nextAttemptAt: Date
+    var lastErrorCode: String?
+    var createdAt: Date
+
+    init(deviceID: UUID, entity: LocalEntityRecord, operation: String) {
+        self.id = UUID()
+        self.clientMutationID = UUID()
+        self.deviceID = deviceID
+        self.entityType = entity.entityType
+        self.entityID = entity.entityID
+        self.entityVersion = entity.version
+        self.operation = operation
+        self.contentHash = entity.contentHash
+        self.payload = entity.payload
+        self.attemptCount = 0
+        self.nextAttemptAt = .now
+        self.createdAt = .now
+    }
+}
+
+@Model
+private final class LocalSyncState {
+    @Attribute(.unique) var key: String
+    var deviceID: UUID
+    var cursor: Int64
+
+    init() {
+        self.key = "primary"
+        self.deviceID = UUID()
+        self.cursor = 0
+    }
+}
+
+@Model
+private final class LocalConflictRecord {
+    @Attribute(.unique) var id: UUID
+    @Attribute(.unique) var key: String
+    var entityType: String
+    var entityID: UUID
+    var localVersion: Int
+    var remoteVersion: Int
+    var remoteCursor: Int64
+    var remoteOperation: String
+    var remotePayload: Data?
+    var remoteClientMutationID: UUID
+    var requiresManualChoice: Bool
+    var createdAt: Date
+
+    init(change: RemoteSyncChange, localVersion: Int) {
+        self.id = UUID()
+        self.key = "\(change.entityType):\(change.entityID.uuidString.lowercased())"
+        self.entityType = change.entityType
+        self.entityID = change.entityID
+        self.localVersion = localVersion
+        self.remoteVersion = change.entityVersion
+        self.remoteCursor = change.cursor
+        self.remoteOperation = change.operation
+        self.remotePayload = change.payload
+        self.remoteClientMutationID = change.clientMutationID
+        self.requiresManualChoice = change.operation == "delete" ||
+            ["plan_node", "schedule_block", "memory", "planning_rule"].contains(change.entityType)
+        self.createdAt = .now
+    }
+
+    var preview: SyncConflictPreview {
+        SyncConflictPreview(
+            id: id, entityType: entityType, entityID: entityID,
+            localVersion: localVersion, remoteVersion: remoteVersion,
+            requiresManualChoice: requiresManualChoice
+        )
+    }
+
+    var remoteChange: RemoteSyncChange {
+        RemoteSyncChange(
+            cursor: remoteCursor, entityType: entityType, entityID: entityID,
+            entityVersion: remoteVersion, operation: remoteOperation,
+            payload: remotePayload, clientMutationID: remoteClientMutationID
+        )
+    }
+}
+
+@MainActor
+final class SwiftDataLocalStore: LocalStore, OutboxStore {
+    private static let migrationMarker = "lamp.swiftdata.migration.v1"
+    private let container: ModelContainer
+    private let context: ModelContext
+    private let legacyJSONURL: URL
+    private let defaults: UserDefaults
+
+    init(databaseURL: URL, legacyJSONURL: URL, defaults: UserDefaults = .standard) throws {
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let schema = Schema([
+            LocalSnapshotRecord.self, LocalEntityRecord.self, LocalOutboxRecord.self,
+            LocalSyncState.self, LocalConflictRecord.self,
+        ])
+        self.container = try ModelContainer(for: schema, configurations: [ModelConfiguration(url: databaseURL)])
+        self.context = ModelContext(container)
+        self.legacyJSONURL = legacyJSONURL
+        self.defaults = defaults
+    }
+
+    func loadSnapshot() throws -> LampSnapshot? {
+        if !defaults.bool(forKey: Self.migrationMarker), FileManager.default.fileExists(atPath: legacyJSONURL.path) {
+            let legacyData = try Data(contentsOf: legacyJSONURL)
+            let snapshot = try JSONDecoder().decode(LampSnapshot.self, from: legacyData)
+            try createEncryptedMigrationBackup(legacyData)
+            do {
+                try saveSnapshotAndEnqueueChanges(snapshot)
+                defaults.set(true, forKey: Self.migrationMarker)
+            } catch {
+                context.rollback()
+                return snapshot
+            }
+            return snapshot
+        }
+        let records = try context.fetch(FetchDescriptor<LocalSnapshotRecord>())
+        guard let data = records.first(where: { $0.key == "current" })?.payload else { return nil }
+        return try JSONDecoder().decode(LampSnapshot.self, from: data)
+    }
+
+    func saveSnapshotAndEnqueueChanges(_ snapshot: LampSnapshot) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let snapshotData = try encoder.encode(snapshot)
+        let snapshots = try context.fetch(FetchDescriptor<LocalSnapshotRecord>())
+        if let record = snapshots.first(where: { $0.key == "current" }) {
+            record.payload = snapshotData
+            record.updatedAt = .now
+        } else {
+            context.insert(LocalSnapshotRecord(payload: snapshotData))
+        }
+
+        var encodedEntities: [(String, UUID, Data)] = []
+        encodedEntities += try snapshot.planItems.map { ("plan_node", $0.id, try encoder.encode($0)) }
+        encodedEntities += try snapshot.blocks.map { ("schedule_block", $0.id, try encoder.encode($0)) }
+        encodedEntities += try snapshot.memories.map { ("memory", $0.id, try encoder.encode($0)) }
+        encodedEntities += try snapshot.rules.map { ("planning_rule", $0.id, try encoder.encode($0)) }
+        encodedEntities += try snapshot.temporaryStates.map { ("temporary_state", $0.id, try encoder.encode($0)) }
+        encodedEntities += try snapshot.recurringSchedules.map { ("recurring_rule", $0.id, try encoder.encode($0)) }
+        encodedEntities += try snapshot.occurrenceOverrides.map { ("occurrence_override", $0.id, try encoder.encode($0)) }
+        try synchronizeEntities(encodedEntities)
+        try context.save()
+    }
+
+    func pendingOutbox(limit: Int, now: Date) throws -> [LocalOutboxMutation] {
+        var descriptor = FetchDescriptor<LocalOutboxRecord>(
+            predicate: #Predicate { $0.nextAttemptAt <= now },
+            sortBy: [SortDescriptor(\LocalOutboxRecord.createdAt)]
+        )
+        descriptor.fetchLimit = min(100, max(1, limit))
+        return try context.fetch(descriptor).map {
+            LocalOutboxMutation(
+                id: $0.id, clientMutationID: $0.clientMutationID, deviceID: $0.deviceID,
+                entityType: $0.entityType, entityID: $0.entityID, entityVersion: $0.entityVersion,
+                operation: $0.operation, contentHash: $0.contentHash, payload: $0.payload,
+                attemptCount: $0.attemptCount, nextAttemptAt: $0.nextAttemptAt
+            )
+        }
+    }
+
+    func acknowledgeOutbox(ids: [UUID]) throws {
+        let selected = Set(ids)
+        for record in try context.fetch(FetchDescriptor<LocalOutboxRecord>()) where selected.contains(record.id) {
+            context.delete(record)
+        }
+        try context.save()
+    }
+
+    func deferOutbox(id: UUID, retryAt: Date, errorCode: String) throws {
+        guard let record = try context.fetch(FetchDescriptor<LocalOutboxRecord>()).first(where: { $0.id == id }) else { return }
+        record.attemptCount = min(record.attemptCount + 1, 12)
+        record.nextAttemptAt = retryAt
+        record.lastErrorCode = String(errorCode.prefix(80))
+        try context.save()
+    }
+
+    func deleteAll() throws {
+        for value in try context.fetch(FetchDescriptor<LocalOutboxRecord>()) { context.delete(value) }
+        for value in try context.fetch(FetchDescriptor<LocalEntityRecord>()) { context.delete(value) }
+        for value in try context.fetch(FetchDescriptor<LocalSnapshotRecord>()) { context.delete(value) }
+        for value in try context.fetch(FetchDescriptor<LocalSyncState>()) { context.delete(value) }
+        for value in try context.fetch(FetchDescriptor<LocalConflictRecord>()) { context.delete(value) }
+        try context.save()
+        try? FileManager.default.removeItem(at: legacyJSONURL)
+        try? FileManager.default.removeItem(at: encryptedBackupURL)
+        defaults.removeObject(forKey: Self.migrationMarker)
+        MigrationBackupKey.delete()
+    }
+
+    func currentSyncCursor() throws -> Int64 { try deviceState().cursor }
+
+    func mergeRemoteChanges(_ changes: [RemoteSyncChange], forceConflicts: Bool) throws -> [SyncConflictPreview] {
+        let entities = try context.fetch(FetchDescriptor<LocalEntityRecord>())
+        let byKey = Dictionary(uniqueKeysWithValues: entities.map { ($0.key, $0) })
+        let pending = try context.fetch(FetchDescriptor<LocalOutboxRecord>())
+        let pendingKeys = Set(pending.map { "\($0.entityType):\($0.entityID.uuidString.lowercased())" })
+        let existingConflicts = try context.fetch(FetchDescriptor<LocalConflictRecord>())
+        var conflictsByKey = Dictionary(uniqueKeysWithValues: existingConflicts.map { ($0.key, $0) })
+        var latestByKey: [String: RemoteSyncChange] = [:]
+        for change in changes {
+            let key = "\(change.entityType):\(change.entityID.uuidString.lowercased())"
+            if change.cursor > (latestByKey[key]?.cursor ?? -1) { latestByKey[key] = change }
+        }
+        let orderedChanges = latestByKey.values.sorted(by: { $0.cursor < $1.cursor })
+        var snapshot = try loadSnapshot() ?? LampSnapshot(
+            planItems: [], blocks: [], memories: [], rules: [], temporaryStates: []
+        )
+        for change in orderedChanges {
+            let key = "\(change.entityType):\(change.entityID.uuidString.lowercased())"
+            let local = byKey[key]
+            if forceConflicts || pendingKeys.contains(key) {
+                if let conflict = conflictsByKey[key] {
+                    conflict.localVersion = local?.version ?? 0
+                    conflict.remoteVersion = change.entityVersion
+                    conflict.remoteCursor = change.cursor
+                    conflict.remoteOperation = change.operation
+                    conflict.remotePayload = change.payload
+                    conflict.remoteClientMutationID = change.clientMutationID
+                    conflict.requiresManualChoice = change.operation == "delete" ||
+                        ["plan_node", "schedule_block", "memory", "planning_rule"].contains(change.entityType)
+                } else {
+                    let conflict = LocalConflictRecord(change: change, localVersion: local?.version ?? 0)
+                    if forceConflicts { conflict.requiresManualChoice = true }
+                    context.insert(conflict)
+                    conflictsByKey[key] = conflict
+                }
+                continue
+            }
+            guard change.entityVersion > (local?.version ?? 0) else { continue }
+            try applyRemote(change, to: &snapshot)
+            let hash = change.payload.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
+                ?? SHA256.hash(data: Data("deleted:\(key):\(change.entityVersion)".utf8)).map { String(format: "%02x", $0) }.joined()
+            if let local {
+                local.version = change.entityVersion
+                local.payload = change.payload
+                local.contentHash = hash
+                local.updatedAt = .now
+                local.deletedAt = change.operation == "delete" ? .now : nil
+            } else if let payload = change.payload {
+                let record = LocalEntityRecord(entityType: change.entityType, entityID: change.entityID, payload: payload, contentHash: hash)
+                record.version = change.entityVersion
+                context.insert(record)
+            }
+        }
+        if forceConflicts {
+            let remoteKeys = Set(orderedChanges.map { "\($0.entityType):\($0.entityID.uuidString.lowercased())" })
+            let remoteCursor = orderedChanges.map(\.cursor).max() ?? 0
+            for item in pending where !remoteKeys.contains("\(item.entityType):\(item.entityID.uuidString.lowercased())") {
+                let key = "\(item.entityType):\(item.entityID.uuidString.lowercased())"
+                guard conflictsByKey[key] == nil else { continue }
+                let absence = RemoteSyncChange(
+                    cursor: remoteCursor, entityType: item.entityType, entityID: item.entityID,
+                    entityVersion: 0, operation: "delete", payload: nil,
+                    clientMutationID: UUID()
+                )
+                let conflict = LocalConflictRecord(change: absence, localVersion: item.entityVersion)
+                conflict.requiresManualChoice = true
+                context.insert(conflict)
+                conflictsByKey[key] = conflict
+            }
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(snapshot)
+        if let record = try context.fetch(FetchDescriptor<LocalSnapshotRecord>()).first(where: { $0.key == "current" }) {
+            record.payload = data
+            record.updatedAt = .now
+        } else {
+            context.insert(LocalSnapshotRecord(payload: data))
+        }
+        if let maximum = changes.map(\.cursor).max() { try deviceState().cursor = max(try deviceState().cursor, maximum) }
+        try context.save()
+        return try pendingConflicts()
+    }
+
+    func pendingConflicts() throws -> [SyncConflictPreview] {
+        try context.fetch(FetchDescriptor<LocalConflictRecord>(
+            sortBy: [SortDescriptor(\LocalConflictRecord.createdAt)]
+        )).map(\.preview)
+    }
+
+    func resolveConflict(id: UUID, useRemote: Bool) throws {
+        guard let conflict = try context.fetch(FetchDescriptor<LocalConflictRecord>()).first(where: { $0.id == id }) else { return }
+        let key = conflict.key
+        let entity = try context.fetch(FetchDescriptor<LocalEntityRecord>()).first(where: { $0.key == key })
+        let pending = try context.fetch(FetchDescriptor<LocalOutboxRecord>()).filter {
+            $0.entityType == conflict.entityType && $0.entityID == conflict.entityID
+        }
+        var snapshot = try loadSnapshot() ?? LampSnapshot(
+            planItems: [], blocks: [], memories: [], rules: [], temporaryStates: []
+        )
+
+        for record in pending { context.delete(record) }
+        if useRemote {
+            let change = conflict.remoteChange
+            try applyRemote(change, to: &snapshot)
+            let hash = change.payload.map(Self.contentHash) ?? Self.contentHash(Data("deleted:\(key):\(change.entityVersion)".utf8))
+            if let entity {
+                entity.version = change.entityVersion
+                entity.payload = change.payload
+                entity.contentHash = hash
+                entity.updatedAt = .now
+                entity.deletedAt = change.operation == "delete" ? .now : nil
+            } else if let payload = change.payload {
+                let inserted = LocalEntityRecord(
+                    entityType: change.entityType, entityID: change.entityID,
+                    payload: payload, contentHash: hash
+                )
+                inserted.version = change.entityVersion
+                context.insert(inserted)
+            }
+        } else if let entity {
+            entity.version = conflict.remoteVersion + 1
+            entity.updatedAt = .now
+            context.insert(LocalOutboxRecord(
+                deviceID: try deviceState().deviceID,
+                entity: entity,
+                operation: entity.deletedAt == nil ? "upsert" : "delete"
+            ))
+        } else {
+            let hash = Self.contentHash(Data("deleted:\(key):\(conflict.remoteVersion + 1)".utf8))
+            let tombstone = LocalEntityRecord(
+                entityType: conflict.entityType, entityID: conflict.entityID,
+                payload: Data(), contentHash: hash
+            )
+            tombstone.version = conflict.remoteVersion + 1
+            tombstone.payload = nil
+            tombstone.deletedAt = .now
+            context.insert(tombstone)
+            context.insert(LocalOutboxRecord(
+                deviceID: try deviceState().deviceID, entity: tombstone, operation: "delete"
+            ))
+        }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let snapshotData = try encoder.encode(snapshot)
+        if let record = try context.fetch(FetchDescriptor<LocalSnapshotRecord>()).first(where: { $0.key == "current" }) {
+            record.payload = snapshotData
+            record.updatedAt = .now
+        } else {
+            context.insert(LocalSnapshotRecord(payload: snapshotData))
+        }
+        context.delete(conflict)
+        try context.save()
+    }
+
+    private static func contentHash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func synchronizeEntities(_ desired: [(String, UUID, Data)]) throws {
+        let syncState = try deviceState()
+        let existing = try context.fetch(FetchDescriptor<LocalEntityRecord>())
+        let existingByKey = Dictionary(uniqueKeysWithValues: existing.map { ($0.key, $0) })
+        let desiredKeys = Set(desired.map { "\($0.0):\($0.1.uuidString.lowercased())" })
+        for (entityType, entityID, payload) in desired {
+            let key = "\(entityType):\(entityID.uuidString.lowercased())"
+            let hash = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+            if let record = existingByKey[key] {
+                guard record.contentHash != hash || record.deletedAt != nil else { continue }
+                record.version += 1
+                record.payload = payload
+                record.contentHash = hash
+                record.updatedAt = .now
+                record.deletedAt = nil
+                context.insert(LocalOutboxRecord(deviceID: syncState.deviceID, entity: record, operation: "upsert"))
+            } else {
+                let record = LocalEntityRecord(entityType: entityType, entityID: entityID, payload: payload, contentHash: hash)
+                context.insert(record)
+                context.insert(LocalOutboxRecord(deviceID: syncState.deviceID, entity: record, operation: "upsert"))
+            }
+        }
+        for record in existing where record.deletedAt == nil && !desiredKeys.contains(record.key) {
+            record.version += 1
+            record.payload = nil
+            record.contentHash = SHA256.hash(data: Data("deleted:\(record.key):\(record.version)".utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            record.updatedAt = .now
+            record.deletedAt = .now
+            context.insert(LocalOutboxRecord(deviceID: syncState.deviceID, entity: record, operation: "delete"))
+        }
+    }
+
+    private func deviceState() throws -> LocalSyncState {
+        if let state = try context.fetch(FetchDescriptor<LocalSyncState>()).first(where: { $0.key == "primary" }) { return state }
+        let state = LocalSyncState()
+        context.insert(state)
+        return state
+    }
+
+    private var encryptedBackupURL: URL {
+        legacyJSONURL.deletingLastPathComponent().appendingPathComponent("snapshot.migration-backup.aesgcm")
+    }
+
+    private func createEncryptedMigrationBackup(_ data: Data) throws {
+        let sealed = try AES.GCM.seal(data, using: MigrationBackupKey.loadOrCreate())
+        guard let combined = sealed.combined else { throw CocoaError(.fileWriteUnknown) }
+        try combined.write(to: encryptedBackupURL, options: .atomic)
+    }
+
+    private func applyRemote(_ change: RemoteSyncChange, to snapshot: inout LampSnapshot) throws {
+        if change.operation == "delete" {
+            switch change.entityType {
+            case "plan_node": snapshot.planItems.removeAll { $0.id == change.entityID }
+            case "schedule_block": snapshot.blocks.removeAll { $0.id == change.entityID }
+            case "memory": snapshot.memories.removeAll { $0.id == change.entityID }
+            case "planning_rule": snapshot.rules.removeAll { $0.id == change.entityID }
+            case "temporary_state": snapshot.temporaryStates.removeAll { $0.id == change.entityID }
+            case "recurring_rule": snapshot.recurringSchedules.removeAll { $0.id == change.entityID }
+            case "occurrence_override": snapshot.occurrenceOverrides.removeAll { $0.id == change.entityID }
+            default: break
+            }
+            return
+        }
+        guard let payload = change.payload else { throw CocoaError(.coderInvalidValue) }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        switch change.entityType {
+        case "plan_node": replace(&snapshot.planItems, with: try decoder.decode(PlanItem.self, from: payload))
+        case "schedule_block": replace(&snapshot.blocks, with: try decoder.decode(ScheduleBlock.self, from: payload))
+        case "memory": replace(&snapshot.memories, with: try decoder.decode(MemoryFact.self, from: payload))
+        case "planning_rule": replace(&snapshot.rules, with: try decoder.decode(PlanningRule.self, from: payload))
+        case "temporary_state": replace(&snapshot.temporaryStates, with: try decoder.decode(TemporaryState.self, from: payload))
+        case "recurring_rule": replace(&snapshot.recurringSchedules, with: try decoder.decode(RecurringScheduleRule.self, from: payload))
+        case "occurrence_override": replace(&snapshot.occurrenceOverrides, with: try decoder.decode(ScheduleOccurrenceOverride.self, from: payload))
+        default: throw CocoaError(.coderInvalidValue)
+        }
+    }
+
+    private func replace<T: Identifiable>(_ values: inout [T], with value: T) where T.ID == UUID {
+        if let index = values.firstIndex(where: { $0.id == value.id }) { values[index] = value } else { values.append(value) }
+    }
+}
+
+@MainActor
+private final class LegacyJSONLocalStore: LocalStore {
+    private let url: URL
+    init(url: URL) { self.url = url }
+    func loadSnapshot() throws -> LampSnapshot? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(LampSnapshot.self, from: Data(contentsOf: url))
+    }
+    func saveSnapshotAndEnqueueChanges(_ snapshot: LampSnapshot) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(snapshot).write(to: url, options: .atomic)
+    }
+    func deleteAll() throws { if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) } }
+    func currentSyncCursor() throws -> Int64 { 0 }
+    func mergeRemoteChanges(_ changes: [RemoteSyncChange], forceConflicts: Bool) throws -> [SyncConflictPreview] {
+        changes.map { SyncConflictPreview(
+            id: UUID(), entityType: $0.entityType, entityID: $0.entityID,
+            localVersion: 0, remoteVersion: $0.entityVersion, requiresManualChoice: true
+        ) }
+    }
+    func pendingConflicts() throws -> [SyncConflictPreview] { [] }
+    func resolveConflict(id: UUID, useRemote: Bool) throws {}
+}
+
+@MainActor
+final class OutboxSyncEngine: SyncEngine {
+    private let localStore: any LocalStore & OutboxStore
+    private let transport: any SyncTransport
+    private let now: () -> Date
+
+    init(localStore: any LocalStore & OutboxStore, transport: any SyncTransport, now: @escaping () -> Date = { .now }) {
+        self.localStore = localStore
+        self.transport = transport
+        self.now = now
+    }
+
+    func synchronize() async throws -> SyncResult {
+        let pending = try localStore.pendingOutbox(limit: 100, now: now())
+        let cursor = try localStore.currentSyncCursor()
+        if cursor == 0, !pending.isEmpty {
+            let remote = try await transport.pull(after: 0, limit: 500)
+            if !remote.isEmpty {
+                let conflicts = try localStore.mergeRemoteChanges(remote, forceConflicts: true)
+                return SyncResult(pushed: 0, pulled: 0, conflicts: conflicts)
+            }
+        }
+        do {
+            if !pending.isEmpty {
+                try await transport.push(pending)
+                try localStore.acknowledgeOutbox(ids: pending.map(\.id))
+            }
+        } catch SyncTransportFailure.conflict {
+            let remote = try await transport.pull(after: localStore.currentSyncCursor(), limit: 500)
+            let conflicts = try localStore.mergeRemoteChanges(remote, forceConflicts: false)
+            return SyncResult(pushed: 0, pulled: remote.count - conflicts.count, conflicts: conflicts)
+        } catch {
+            for item in pending {
+                let exponent = min(10, item.attemptCount)
+                let delay = min(3_600.0, pow(2.0, Double(exponent)) * 2.0)
+                try? localStore.deferOutbox(id: item.id, retryAt: now().addingTimeInterval(delay), errorCode: "SYNC_PUSH_FAILED")
+            }
+            throw error
+        }
+        let remote = try await transport.pull(after: localStore.currentSyncCursor(), limit: 500)
+        let conflicts = try localStore.mergeRemoteChanges(remote, forceConflicts: false)
+        return SyncResult(pushed: pending.count, pulled: remote.count - conflicts.count, conflicts: conflicts)
+    }
+}
+
+private enum MigrationBackupKey {
+    private static let service = "com.lamp.swiftdata-migration"
+    private static let account = "snapshot-backup-key-v1"
+
+    static func loadOrCreate() throws -> SymmetricKey {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data {
+            return SymmetricKey(data: data)
+        }
+        let data = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+        let item: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw CocoaError(.fileWriteNoPermission) }
+        return SymmetricKey(data: data)
+    }
+
+    static func delete() {
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ] as CFDictionary)
     }
 }

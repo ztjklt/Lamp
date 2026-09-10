@@ -300,7 +300,7 @@ final class LampUITests: XCTestCase {
 
     func testFixedScheduleCanBeDeletedLocallyAndUndone() {
         launch()
-        let fixed = app.staticTexts["课程：金融学"]
+        let fixed = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "课程：金融学")).firstMatch
         XCTAssertTrue(fixed.waitForExistence(timeout: 3))
         fixed.tap()
         let delete = app.buttons["taskEditor.delete"]
