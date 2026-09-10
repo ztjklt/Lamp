@@ -1,0 +1,55 @@
+name: Production hardening gates
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main, "codex/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  agent-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent-core/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run eval
+      - run: npm audit --omit=dev --audit-level=high
+
+  supabase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - run: supabase start
+      - run: supabase db reset --local
+      - run: supabase db lint --local --level warning
+      - run: supabase test db
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+      - run: >-
+          xcodebuild -project Lamp.xcodeproj -scheme Lamp -sdk iphonesimulator
+          -configuration Debug CODE_SIGNING_ALLOWED=NO build
+      - run: >-
+          xcodebuild test -project Lamp.xcodeproj -scheme Lamp
+          -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16 Pro'
+          -only-testing:LampUITests CODE_SIGNING_ALLOWED=NO
