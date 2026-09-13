@@ -266,8 +266,8 @@ begin
   end loop;
   insert into public.account_migration_audit(source_user_hash, target_user_hash, status)
   values (
-    encode(digest(p_source_user::text, 'sha256'), 'hex'),
-    encode(digest(p_target_user::text, 'sha256'), 'hex'), 'completed'
+    encode(extensions.digest(p_source_user::text, 'sha256'), 'hex'),
+    encode(extensions.digest(p_target_user::text, 'sha256'), 'hex'), 'completed'
   );
   return jsonb_build_object('status', 'migrated', 'userId', p_target_user);
 end;
@@ -282,7 +282,7 @@ as $$
 declare v_receipt uuid;
 begin
   insert into public.account_deletion_receipts(user_hash)
-  values (encode(digest(p_user_id::text, 'sha256'), 'hex')) returning id into v_receipt;
+  values (encode(extensions.digest(p_user_id::text, 'sha256'), 'hex')) returning id into v_receipt;
   return v_receipt;
 end;
 $$;
@@ -406,7 +406,7 @@ begin
     raise exception using errcode = '42501', message = 'user_identity_mismatch';
   end if;
 
-  v_request_hash := encode(digest(
+  v_request_hash := encode(extensions.digest(
     p_proposal_id::text || ':' || p_preview_hash || ':' || p_confirmation_token_hash || ':' || p_expected_state_version::text,
     'sha256'
   ), 'hex');
@@ -458,7 +458,7 @@ begin
           user_id, entity_type, entity_id, entity_version, operation, payload, content_hash, client_mutation_id
         ) values (
           v_user_id, 'schedule_block', v_replaced.id, v_block_version, 'delete', null,
-          encode(digest('deleted:' || v_replaced.id::text || ':' || v_block_version::text, 'sha256'), 'hex'), v_mutation_id
+          encode(extensions.digest('deleted:' || v_replaced.id::text || ':' || v_block_version::text, 'sha256'), 'hex'), v_mutation_id
         );
       end if;
       v_mutation_id := gen_random_uuid();
@@ -489,7 +489,7 @@ begin
           'kind', 'focus', 'state', 'planned', 'reason', array_to_string(array(select jsonb_array_elements_text(coalesce(v_operation->'reasonCodes', '[]'::jsonb))), ', '),
           'provenance', 'Lamp Agent Core · 用户确认', 'recurringRuleID', null, 'occurrenceDate', null
         ),
-        encode(digest(v_operation::text, 'sha256'), 'hex'), v_mutation_id
+        encode(extensions.digest(v_operation::text, 'sha256'), 'hex'), v_mutation_id
       );
     elsif v_operation->>'type' = 'remove_schedule_block' then
       v_mutation_id := gen_random_uuid();
@@ -503,7 +503,7 @@ begin
         user_id, entity_type, entity_id, entity_version, operation, payload, content_hash, client_mutation_id
       ) values (
         v_user_id, 'schedule_block', (v_operation->>'id')::uuid, v_block_version, 'delete', null,
-        encode(digest('deleted:' || (v_operation->>'id') || ':' || v_block_version::text, 'sha256'), 'hex'), v_mutation_id
+        encode(extensions.digest('deleted:' || (v_operation->>'id') || ':' || v_block_version::text, 'sha256'), 'hex'), v_mutation_id
       );
     elsif v_operation->>'type' = 'set_temporary_state' then
       if length(coalesce(v_operation->>'title', '')) not between 1 and 120 or
@@ -539,7 +539,7 @@ begin
           'expiresAt', v_operation->>'expiresAt',
           'workloadMultiplier', (v_operation->>'workloadMultiplier')::numeric
         ),
-        encode(digest(v_operation::text, 'sha256'), 'hex'), v_mutation_id
+        encode(extensions.digest(v_operation::text, 'sha256'), 'hex'), v_mutation_id
       );
     else
       raise exception using errcode = '22023', message = 'unsupported_proposal_operation';
@@ -557,7 +557,7 @@ begin
     jsonb_build_object('previewHash', true, 'stateVersion', true),
     jsonb_build_object('proposalId', p_proposal_id, 'stateVersion', v_new_version),
     v_request_hash,
-    encode(digest(p_proposal_id::text || ':' || v_new_version::text, 'sha256'), 'hex')
+    encode(extensions.digest(p_proposal_id::text || ':' || v_new_version::text, 'sha256'), 'hex')
   );
 
   return jsonb_build_object('proposalId', p_proposal_id, 'stateVersion', v_new_version, 'status', 'applied');
