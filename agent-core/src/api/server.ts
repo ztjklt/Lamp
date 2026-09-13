@@ -17,6 +17,8 @@ import { SupabaseProposalRepository } from "../infrastructure/repositories/Supab
 import { InMemoryAgentRunRepository } from "../infrastructure/repositories/InMemoryAgentRunRepository.js";
 import { SupabaseAgentRunRepository } from "../infrastructure/repositories/SupabaseRepositories.js";
 import { SupabaseRestClient } from "../infrastructure/supabase/SupabaseRestClient.js";
+import { DebugApi } from "../debug/DebugApi.js";
+import { LocalDebugHarness } from "../debug/LocalDebugHarness.js";
 
 const config = loadConfig({
   ...process.env,
@@ -33,6 +35,14 @@ const languageReplanService = createLanguageReplanService();
 const proposalRepository = createProposalRepository();
 const runRepository = createAgentRunRepository();
 const confirmationSecret = config.persistence?.confirmationHmacSecret ?? "lamp-local-confirmation-secret-32-bytes";
+const debugHarness = new LocalDebugHarness();
+const debugApi = new DebugApi(
+  { enabled: config.debug.enabled, environment: config.environment },
+  debugHarness,
+  debugHarness.runs,
+  debugHarness.snapshots,
+  debugHarness.audits,
+);
 const v2ProposalService = new V2ProposalService(proposalRepository, {
   plan_day: (input) => planDayService.createProposal(input) as unknown as Record<string, unknown>,
   replan_incomplete: async (input, userId) => await incompleteReplanService.createProposal(input, userId) as unknown as Record<string, unknown>,
@@ -114,6 +124,42 @@ const server = http.createServer(async (request, response) => {
     return;
   }
   const requestURL = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  const isDebugRoute = requestURL.pathname === "/debug/agent/run" ||
+    requestURL.pathname === "/debug/replay" ||
+    requestURL.pathname === "/planning/simulate" ||
+    requestURL.pathname === "/planning/validate" ||
+    /^\/agent\/runs\/[0-9a-f-]+(?:\/trace)?$/i.test(requestURL.pathname);
+  if (isDebugRoute) {
+    if (request.method !== "GET" && request.method !== "POST") {
+      send(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    if (serviceToken !== undefined && request.headers.authorization !== `Bearer ${serviceToken}`) {
+      send(response, 401, { error: "unauthorized" });
+      return;
+    }
+    const suppliedUser = request.headers["x-lamp-user"]?.toString();
+    if (remoteEnvironment && !isUUID(suppliedUser)) {
+      send(response, 401, { error: "invalid_user_identity" });
+      return;
+    }
+    try {
+      const result = await debugApi.handle({
+        method: request.method === "GET" ? "GET" : "POST",
+        path: requestURL.pathname,
+        authenticatedUserId: suppliedUser ?? "lamp-local-client",
+        ...(request.method === "GET" ? {} : { body: await readJSON(request) }),
+      });
+      writeRequestLog({ traceId, ...(suppliedUser === undefined ? {} : { userId: suppliedUser }),
+        route: requestURL.pathname, status: "ok", latencyMs: performance.now() - startedAt });
+      send(response, 200, result);
+    } catch (error) {
+      sendError(response, "debug_api", error, {
+        traceId, userId: suppliedUser ?? "lamp-local-client", route: requestURL.pathname, startedAt,
+      });
+    }
+    return;
+  }
   const v2CreateMatch = requestURL.pathname.match(/^\/v2\/proposals\/(plan-day|replan-incomplete|replan-language)$/);
   const v2ResourceMatch = requestURL.pathname.match(/^\/v2\/proposals\/([0-9a-f-]+)(?:\/(confirm|reject))?$/i);
   if (v2CreateMatch !== null || v2ResourceMatch !== null) {

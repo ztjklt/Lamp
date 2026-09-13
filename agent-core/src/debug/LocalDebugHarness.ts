@@ -206,11 +206,16 @@ class DebugMockProvider implements LLMProvider {
 }
 
 function stateForRequest(request: AgentRequest): StateSnapshot {
-  const state = StudentNormalDay(900);
-  if (request.context.userId !== state.userId || request.context.timezone !== state.timezone) {
-    throw new Error("Local debug fixture requires eval-user in Asia/Singapore");
+  const fixture = StudentNormalDay(900);
+  if (request.context.timezone !== fixture.timezone) {
+    throw new Error("Local debug fixture requires Asia/Singapore");
   }
-  return StateSnapshotSchema.parse(state);
+  return StateSnapshotSchema.parse({
+    ...fixture,
+    userId: request.context.userId,
+    user: { ...fixture.user, id: request.context.userId },
+    preferences: { ...fixture.preferences, userId: request.context.userId },
+  });
 }
 
 function inferredIntent(input: string): Intent["intent"] {

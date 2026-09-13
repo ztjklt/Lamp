@@ -31,7 +31,7 @@ export interface DebugAgentService {
 
 export interface DebugApiOptions {
   enabled: boolean;
-  environment: "development" | "test" | "production";
+  environment: "development" | "test" | "staging" | "production";
 }
 
 export interface DebugApiRequest {

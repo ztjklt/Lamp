@@ -57,6 +57,32 @@ describe("V2ProposalService", () => {
       reasonCodes: ["USER_REQUESTED_REPLAN"] }]);
   });
 
+  it("commits a language-derived temporary state in the same proposal transaction", async () => {
+    const now = () => new Date("2030-01-01T10:00:00.000Z");
+    const repository = new InMemoryProposalRepository(now);
+    const languageResponse = {
+      ...response(),
+      trace: { decision: { temporaryState: "tired" } },
+    };
+    const service = new V2ProposalService(repository, {
+      plan_day: () => response(),
+      replan_incomplete: async () => response(),
+      replan_language: async () => languageResponse,
+    }, secret, now);
+
+    await service.create("replan_language", {
+      expectedStateVersion: 7, request: { any: "fixture" },
+    }, "user-a");
+
+    const stored = await repository.getOwned(ids.proposal, "user-a");
+    expect(stored?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "set_temporary_state", title: "疲惫",
+        expiresAt: "2030-01-02T10:00:00.000Z", workloadMultiplier: 0.55,
+      }),
+    ]));
+  });
+
   it("requires matching token, preview hash, version, and owner", async () => {
     const { service } = fixture();
     const proposal = await service.create("plan_day", { expectedStateVersion: 7, request: {} }, "user-a");

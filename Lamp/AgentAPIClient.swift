@@ -287,6 +287,8 @@ enum AgentAPIClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ClientError.invalidResponse }
         guard http.statusCode == 200 else {
+            if http.statusCode == 409 { throw SyncTransportFailure.conflict }
+            if http.statusCode == 410 { throw SyncTransportFailure.expired }
             let payload = try? JSONDecoder().decode(APIErrorPayload.self, from: data)
             throw ClientError.server(payload?.message ?? payload?.error ?? "确认失败，请刷新后重试")
         }
@@ -626,6 +628,7 @@ private actor SupabaseAnonymousSession {
 
 enum SyncTransportFailure: Error {
     case conflict
+    case expired
     case unauthorized
     case unavailable
     case invalidResponse
@@ -633,6 +636,16 @@ enum SyncTransportFailure: Error {
 
 @MainActor
 final class SupabaseSyncTransport: SyncTransport {
+    func confirmProposal(_ confirmation: PendingProposalConfirmation) async throws -> Int {
+        try await AgentAPIClient.confirmProposal(
+            id: confirmation.proposalID,
+            previewHash: confirmation.previewHash,
+            confirmationToken: confirmation.confirmationToken,
+            expectedStateVersion: confirmation.expectedStateVersion,
+            idempotencyKey: confirmation.idempotencyKey
+        )
+    }
+
     func push(_ mutations: [LocalOutboxMutation]) async throws {
         guard let deviceID = mutations.first?.deviceID,
               mutations.allSatisfy({ $0.deviceID == deviceID }) else { return }

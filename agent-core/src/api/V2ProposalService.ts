@@ -53,10 +53,10 @@ export class V2ProposalService {
     }
     const proposal = objectField(response, "proposal");
     const proposalId = stringField(proposal, "id");
-    const operations = operationsFor(response);
+    const createdAt = this.now();
+    const operations = operationsFor(response, createdAt);
     const previewHash = stableHash({ kind, requestId, sourceFingerprint, expectedStateVersion: input.expectedStateVersion, proposal, operations });
     const token = this.confirmationToken({ proposalId, userId, requestId, requestHash });
-    const createdAt = this.now();
     const trace = traceOf(response);
     const record: StoredProposal = {
       proposalId, userId, kind, requestId, requestHash, sourceFingerprint, expectedStateVersion: input.expectedStateVersion,
@@ -220,7 +220,7 @@ function agentRunFor(
   };
 }
 
-function operationsFor(response: Record<string, unknown>): ProposalOperation[] {
+function operationsFor(response: Record<string, unknown>, createdAt: Date): ProposalOperation[] {
   const proposal = objectField(response, "proposal");
   const blocks = arrayField(proposal, "blocks").map(objectValue);
   const changes = arrayField(proposal, "changes", false).map(objectValue);
@@ -245,7 +245,24 @@ function operationsFor(response: Record<string, unknown>): ProposalOperation[] {
       if (id !== undefined) operations.push({ type: "remove_schedule_block", id });
     }
   }
+  const trace = optionalObjectValue(response["trace"]);
+  const decision = optionalObjectValue(trace?.["decision"]);
+  if (decision?.["temporaryState"] === "tired") {
+    operations.push({
+      type: "set_temporary_state",
+      id: deterministicUuid(stringField(proposal, "id"), "temporary-state", "tired"),
+      title: "疲惫",
+      expiresAt: new Date(createdAt.getTime() + 24 * 60 * 60_000).toISOString(),
+      workloadMultiplier: 0.55,
+    });
+  }
   return operations;
+}
+
+function optionalObjectValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function publicRecord(record: StoredProposal, confirmationToken?: string): Record<string, unknown> {

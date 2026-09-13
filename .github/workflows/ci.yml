@@ -45,11 +45,31 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent-core/package-lock.json
+      - run: npm ci --prefix agent-core
       - run: swift test
       - run: >-
           xcodebuild -project Lamp.xcodeproj -scheme Lamp -sdk iphonesimulator
           -configuration Debug CODE_SIGNING_ALLOWED=NO build
+      - name: Start local Agent Core for UI tests
+        run: |
+          LAMP_AGENT_PORT=8790 npm --prefix agent-core run api > "$RUNNER_TEMP/lamp-agent-core.log" 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8790/health > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/lamp-agent-core.log"
+          exit 1
       - run: >-
           xcodebuild test -project Lamp.xcodeproj -scheme Lamp
           -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16 Pro'
           -only-testing:LampUITests CODE_SIGNING_ALLOWED=NO
+      - name: Print Agent Core log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/lamp-agent-core.log" || true

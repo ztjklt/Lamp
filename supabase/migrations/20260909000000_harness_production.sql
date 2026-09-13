@@ -505,6 +505,42 @@ begin
         v_user_id, 'schedule_block', (v_operation->>'id')::uuid, v_block_version, 'delete', null,
         encode(digest('deleted:' || (v_operation->>'id') || ':' || v_block_version::text, 'sha256'), 'hex'), v_mutation_id
       );
+    elsif v_operation->>'type' = 'set_temporary_state' then
+      if length(coalesce(v_operation->>'title', '')) not between 1 and 120 or
+         (v_operation->>'workloadMultiplier')::numeric <= 0 or
+         (v_operation->>'workloadMultiplier')::numeric > 2 or
+         (v_operation->>'expiresAt')::timestamptz <= now() or
+         (v_operation->>'expiresAt')::timestamptz > now() + interval '25 hours' then
+        raise exception using errcode = '22023', message = 'invalid_temporary_state';
+      end if;
+      v_mutation_id := gen_random_uuid();
+      insert into public.temporary_states(id, user_id, payload, expires_at, version, client_mutation_id)
+      values (
+        (v_operation->>'id')::uuid, v_user_id,
+        jsonb_build_object(
+          'id', v_operation->>'id', 'title', v_operation->>'title',
+          'expiresAt', v_operation->>'expiresAt',
+          'workloadMultiplier', (v_operation->>'workloadMultiplier')::numeric
+        ),
+        (v_operation->>'expiresAt')::timestamptz, 1, v_mutation_id
+      ) on conflict (id) do update set
+        payload = excluded.payload, expires_at = excluded.expires_at,
+        version = public.temporary_states.version + 1, updated_at = now(), deleted_at = null,
+        client_mutation_id = excluded.client_mutation_id
+      where public.temporary_states.user_id = v_user_id
+      returning version into v_block_version;
+      if not found then raise exception using errcode = '42501', message = 'temporary_state_owner_mismatch'; end if;
+      insert into public.sync_changes(
+        user_id, entity_type, entity_id, entity_version, operation, payload, content_hash, client_mutation_id
+      ) values (
+        v_user_id, 'temporary_state', (v_operation->>'id')::uuid, v_block_version, 'upsert',
+        jsonb_build_object(
+          'id', v_operation->>'id', 'title', v_operation->>'title',
+          'expiresAt', v_operation->>'expiresAt',
+          'workloadMultiplier', (v_operation->>'workloadMultiplier')::numeric
+        ),
+        encode(digest(v_operation::text, 'sha256'), 'hex'), v_mutation_id
+      );
     else
       raise exception using errcode = '22023', message = 'unsupported_proposal_operation';
     end if;
@@ -766,6 +802,11 @@ begin
   end loop;
 
   select coalesce(max(cursor), 0) into v_max_cursor from public.sync_changes where user_id = v_user_id;
+  if v_accepted > 0 then
+    update public.profiles
+      set state_version = state_version + 1, updated_at = now()
+      where id = v_user_id;
+  end if;
   update public.sync_devices set last_cursor = v_max_cursor, last_seen_at = now()
     where device_id = p_device_id and user_id = v_user_id;
   return jsonb_build_object('accepted', v_accepted, 'cursor', v_max_cursor);

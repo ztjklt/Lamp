@@ -57,6 +57,16 @@ describe("Phase 9 debug harness", () => {
     });
   });
 
+  it("binds the staging fixture to an authenticated UUID without weakening ownership", async () => {
+    const userId = "90000000-0000-4000-8000-000000000001";
+    const input = request("staging-debug-request");
+    input.context.userId = userId;
+    input.context.authentication.subject = userId;
+    const artifact = await new LocalDebugHarness().run(input);
+    expect(artifact.replayBundle.state.userId).toBe(userId);
+    expect(artifact.replayBundle.request.context.userId).toBe(userId);
+  });
+
   it("orders tool selection, policy checks, execution, and the following model turn", async () => {
     const artifact = await new LocalDebugHarness().run(request("tool-trace-request", "查看我的任务"));
     const types = artifact.trace.events.map((event) => event.type);

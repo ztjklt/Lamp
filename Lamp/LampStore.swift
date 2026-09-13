@@ -322,6 +322,7 @@ final class LampStore: ObservableObject {
             reason: reason.isEmpty ? "本次未完成" : reason
         )
         save()
+        try await prepareCloudProposalState()
 
         let occurredAt = agentReferenceDate()
         let dayStart = calendar.startOfDay(for: occurredAt)
@@ -1049,25 +1050,24 @@ final class LampStore: ObservableObject {
            let confirmationToken = proposal.confirmationToken,
            let expectedVersion = proposal.expectedStateVersion {
             do {
-                cloudStateVersion = try await AgentAPIClient.confirmProposal(
-                    id: proposal.id, previewHash: previewHash, confirmationToken: confirmationToken,
-                    expectedStateVersion: expectedVersion, idempotencyKey: proposal.confirmationIdempotencyKey
-                )
-                UserDefaults.standard.set(cloudStateVersion, forKey: "lamp.cloud.state-version")
-                guard await synchronize() else {
-                    toast = "云端已确认，等待网络恢复后同步到本机"
-                    return false
+                guard let outbox = localStore as? any OutboxStore else {
+                    throw AgentAPIClient.ClientError.invalidResponse
                 }
-                if let state = proposal.temporaryStateTitle {
-                    temporaryStates.append(TemporaryState(
-                        title: state,
-                        expiresAt: calendar.date(byAdding: .day, value: 1, to: .now)!,
-                        workloadMultiplier: 0.55
-                    ))
-                    save()
-                }
+                try outbox.enqueueProposalConfirmation(PendingProposalConfirmation(
+                    id: UUID(), proposalID: proposal.id, previewHash: previewHash,
+                    confirmationToken: confirmationToken, expectedStateVersion: expectedVersion,
+                    idempotencyKey: proposal.confirmationIdempotencyKey,
+                    expiresAt: proposal.expiresAt ?? .now.addingTimeInterval(15 * 60),
+                    attemptCount: 0, nextAttemptAt: .now
+                ))
                 pendingReplan = nil
-                toast = "方案已确认并同步"
+                toast = nil
+                let synchronized = await synchronize()
+                if synchronized, syncConflicts.isEmpty {
+                    toast = "方案已确认并同步"
+                } else if !synchronized, toast == nil {
+                    toast = "确认已安全排队，联网后会重新校验并同步"
+                }
                 return true
             } catch {
                 toast = error.localizedDescription
@@ -1210,6 +1210,7 @@ final class LampStore: ObservableObject {
     }
 
     private func proposeLanguageReplan(input: String, now: Date = .now) async throws -> String {
+        try await prepareCloudProposalState()
         let requestedAt = agentReferenceDate(fallback: now)
         let dayStart = calendar.startOfDay(for: requestedAt)
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart), requestedAt < dayEnd else {
@@ -1347,6 +1348,7 @@ final class LampStore: ObservableObject {
     }
 
     private func proposeDayPlan(now: Date = .now) async throws -> String {
+        try await prepareCloudProposalState()
         let planningNow = agentReferenceDate(fallback: now)
         let dayStart = calendar.startOfDay(for: planningNow)
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else {
@@ -1580,9 +1582,26 @@ final class LampStore: ObservableObject {
             }
             syncLogger.info("sync completed pushed=\(result.pushed, privacy: .public) pulled=\(result.pulled, privacy: .public) conflicts=\(result.conflicts.count, privacy: .public)")
             return true
+        } catch SyncTransportFailure.conflict {
+            toast = "排队的确认与最新云端状态冲突，请重新生成方案"
+            syncLogger.error("sync failed code=PROPOSAL_CONFIRM_CONFLICT")
+            return false
+        } catch SyncTransportFailure.expired {
+            toast = "排队的确认已过期，请重新生成方案"
+            syncLogger.error("sync failed code=PROPOSAL_CONFIRM_EXPIRED")
+            return false
         } catch {
             syncLogger.error("sync failed code=SYNC_UNAVAILABLE")
             return false
+        }
+    }
+
+    private func prepareCloudProposalState() async throws {
+        guard syncEngine != nil,
+              !ProcessInfo.processInfo.arguments.contains("-ui-testing") else { return }
+        guard await synchronize() else { throw AgentAPIClient.ClientError.network }
+        guard syncConflicts.isEmpty else {
+            throw AgentAPIClient.ClientError.server("请先处理同步合并预览，再生成新的调整方案")
         }
     }
 
@@ -1976,6 +1995,10 @@ protocol OutboxStore: AnyObject {
     func pendingOutbox(limit: Int, now: Date) throws -> [LocalOutboxMutation]
     func acknowledgeOutbox(ids: [UUID]) throws
     func deferOutbox(id: UUID, retryAt: Date, errorCode: String) throws
+    func enqueueProposalConfirmation(_ confirmation: PendingProposalConfirmation) throws
+    func pendingProposalConfirmations(limit: Int, now: Date) throws -> [PendingProposalConfirmation]
+    func acknowledgeProposalConfirmation(id: UUID) throws
+    func deferProposalConfirmation(id: UUID, retryAt: Date, errorCode: String) throws
 }
 
 @MainActor
@@ -1987,6 +2010,7 @@ protocol SyncEngine: AnyObject {
 protocol SyncTransport: AnyObject {
     func push(_ mutations: [LocalOutboxMutation]) async throws
     func pull(after cursor: Int64, limit: Int) async throws -> [RemoteSyncChange]
+    func confirmProposal(_ confirmation: PendingProposalConfirmation) async throws -> Int
 }
 
 struct RemoteSyncChange: Sendable, Equatable {
@@ -2024,6 +2048,18 @@ struct LocalOutboxMutation: Identifiable, Sendable, Equatable {
     var operation: String
     var contentHash: String
     var payload: Data?
+    var attemptCount: Int
+    var nextAttemptAt: Date
+}
+
+struct PendingProposalConfirmation: Identifiable, Sendable, Equatable {
+    var id: UUID
+    var proposalID: UUID
+    var previewHash: String
+    var confirmationToken: String
+    var expectedStateVersion: Int
+    var idempotencyKey: UUID
+    var expiresAt: Date
     var attemptCount: Int
     var nextAttemptAt: Date
 }
@@ -2092,6 +2128,43 @@ private final class LocalOutboxRecord {
         self.attemptCount = 0
         self.nextAttemptAt = .now
         self.createdAt = .now
+    }
+}
+
+@Model
+private final class LocalProposalConfirmationRecord {
+    @Attribute(.unique) var id: UUID
+    @Attribute(.unique) var proposalID: UUID
+    var previewHash: String
+    var confirmationToken: String
+    var expectedStateVersion: Int
+    var idempotencyKey: UUID
+    var expiresAt: Date
+    var attemptCount: Int
+    var nextAttemptAt: Date
+    var lastErrorCode: String?
+    var createdAt: Date
+
+    init(_ value: PendingProposalConfirmation) {
+        self.id = value.id
+        self.proposalID = value.proposalID
+        self.previewHash = value.previewHash
+        self.confirmationToken = value.confirmationToken
+        self.expectedStateVersion = value.expectedStateVersion
+        self.idempotencyKey = value.idempotencyKey
+        self.expiresAt = value.expiresAt
+        self.attemptCount = value.attemptCount
+        self.nextAttemptAt = value.nextAttemptAt
+        self.createdAt = .now
+    }
+
+    var value: PendingProposalConfirmation {
+        PendingProposalConfirmation(
+            id: id, proposalID: proposalID, previewHash: previewHash,
+            confirmationToken: confirmationToken, expectedStateVersion: expectedStateVersion,
+            idempotencyKey: idempotencyKey, expiresAt: expiresAt,
+            attemptCount: attemptCount, nextAttemptAt: nextAttemptAt
+        )
     }
 }
 
@@ -2168,7 +2241,7 @@ final class SwiftDataLocalStore: LocalStore, OutboxStore {
         try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let schema = Schema([
             LocalSnapshotRecord.self, LocalEntityRecord.self, LocalOutboxRecord.self,
-            LocalSyncState.self, LocalConflictRecord.self,
+            LocalProposalConfirmationRecord.self, LocalSyncState.self, LocalConflictRecord.self,
         ])
         self.container = try ModelContainer(for: schema, configurations: [ModelConfiguration(url: databaseURL)])
         self.context = ModelContext(container)
@@ -2252,8 +2325,47 @@ final class SwiftDataLocalStore: LocalStore, OutboxStore {
         try context.save()
     }
 
+    func enqueueProposalConfirmation(_ confirmation: PendingProposalConfirmation) throws {
+        let records = try context.fetch(FetchDescriptor<LocalProposalConfirmationRecord>())
+        if let existing = records.first(where: { $0.proposalID == confirmation.proposalID }) {
+            guard existing.previewHash == confirmation.previewHash,
+                  existing.confirmationToken == confirmation.confirmationToken,
+                  existing.expectedStateVersion == confirmation.expectedStateVersion else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            return
+        }
+        context.insert(LocalProposalConfirmationRecord(confirmation))
+        try context.save()
+    }
+
+    func pendingProposalConfirmations(limit: Int, now: Date) throws -> [PendingProposalConfirmation] {
+        var descriptor = FetchDescriptor<LocalProposalConfirmationRecord>(
+            predicate: #Predicate { $0.nextAttemptAt <= now },
+            sortBy: [SortDescriptor(\LocalProposalConfirmationRecord.createdAt)]
+        )
+        descriptor.fetchLimit = min(20, max(1, limit))
+        return try context.fetch(descriptor).map(\.value)
+    }
+
+    func acknowledgeProposalConfirmation(id: UUID) throws {
+        if let record = try context.fetch(FetchDescriptor<LocalProposalConfirmationRecord>()).first(where: { $0.id == id }) {
+            context.delete(record)
+            try context.save()
+        }
+    }
+
+    func deferProposalConfirmation(id: UUID, retryAt: Date, errorCode: String) throws {
+        guard let record = try context.fetch(FetchDescriptor<LocalProposalConfirmationRecord>()).first(where: { $0.id == id }) else { return }
+        record.attemptCount = min(record.attemptCount + 1, 12)
+        record.nextAttemptAt = retryAt
+        record.lastErrorCode = String(errorCode.prefix(80))
+        try context.save()
+    }
+
     func deleteAll() throws {
         for value in try context.fetch(FetchDescriptor<LocalOutboxRecord>()) { context.delete(value) }
+        for value in try context.fetch(FetchDescriptor<LocalProposalConfirmationRecord>()) { context.delete(value) }
         for value in try context.fetch(FetchDescriptor<LocalEntityRecord>()) { context.delete(value) }
         for value in try context.fetch(FetchDescriptor<LocalSnapshotRecord>()) { context.delete(value) }
         for value in try context.fetch(FetchDescriptor<LocalSyncState>()) { context.delete(value) }
@@ -2548,6 +2660,32 @@ final class OutboxSyncEngine: SyncEngine {
     }
 
     func synchronize() async throws -> SyncResult {
+        let confirmations = try localStore.pendingProposalConfirmations(limit: 20, now: now())
+        for confirmation in confirmations {
+            if confirmation.expiresAt <= now() {
+                try localStore.acknowledgeProposalConfirmation(id: confirmation.id)
+                throw SyncTransportFailure.expired
+            }
+            do {
+                _ = try await transport.confirmProposal(confirmation)
+                try localStore.acknowledgeProposalConfirmation(id: confirmation.id)
+            } catch SyncTransportFailure.conflict {
+                try localStore.acknowledgeProposalConfirmation(id: confirmation.id)
+                throw SyncTransportFailure.conflict
+            } catch SyncTransportFailure.expired {
+                try localStore.acknowledgeProposalConfirmation(id: confirmation.id)
+                throw SyncTransportFailure.expired
+            } catch {
+                let exponent = min(10, confirmation.attemptCount)
+                let delay = min(3_600.0, pow(2.0, Double(exponent)) * 2.0)
+                try? localStore.deferProposalConfirmation(
+                    id: confirmation.id,
+                    retryAt: now().addingTimeInterval(delay),
+                    errorCode: "PROPOSAL_CONFIRM_FAILED"
+                )
+                throw error
+            }
+        }
         let pending = try localStore.pendingOutbox(limit: 100, now: now())
         let cursor = try localStore.currentSyncCursor()
         if cursor == 0, !pending.isEmpty {

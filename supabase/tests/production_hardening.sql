@@ -1,5 +1,5 @@
 begin;
-select plan(25);
+select plan(30);
 
 insert into auth.users (instance_id, id, aud, role, email, encrypted_password, created_at, updated_at)
 values
@@ -42,6 +42,30 @@ select results_eq(
   $$ select count(*)::bigint from public.plan_nodes $$,
   $$ values (1::bigint) $$,
   'user B reads only user B rows'
+);
+select results_eq(
+  $$ select public.push_sync_batch(
+    '50000000-0000-4000-8000-000000000001',
+    jsonb_build_array(jsonb_build_object(
+      'entityType', 'plan_node',
+      'entityId', '50000000-0000-4000-8000-000000000002',
+      'entityVersion', 1,
+      'operation', 'upsert',
+      'payload', jsonb_build_object(
+        'kind', 'task', 'title', 'Synced task', 'detail', '', 'importance', 3,
+        'estimatedMinutes', 20, 'remainingMinutes', 20, 'progress', 0, 'isPaused', false
+      ),
+      'contentHash', repeat('9', 64),
+      'clientMutationId', '50000000-0000-4000-8000-000000000003'
+    ))
+  ) ->> 'accepted' $$,
+  $$ values ('1'::text) $$,
+  'accepted sync writes advance through the atomic batch'
+);
+select results_eq(
+  $$ select state_version from public.profiles where id = '10000000-0000-4000-8000-000000000002' $$,
+  $$ values (1::bigint) $$,
+  'an accepted sync batch advances the authoritative state version'
 );
 
 set local role service_role;
@@ -177,6 +201,45 @@ select results_eq(
   $$ select state_version from public.profiles where id = '10000000-0000-4000-8000-000000000001' $$,
   $$ values (1::bigint) $$,
   'failed fixed-block mutation rolls back the version increment'
+);
+
+insert into public.replan_proposals(
+  id, user_id, reason, kind, request_id, request_hash, preview_hash,
+  source_fingerprint, expected_state_version, confirmation_token_hash, diff, expires_at
+) values (
+  '30000000-0000-4000-8000-000000000004', '10000000-0000-4000-8000-000000000001',
+  'replan_language', 'replan_language', 'request-temporary-state', repeat('a', 64), repeat('b', 64), repeat('c', 64),
+  1, repeat('d', 64),
+  jsonb_build_object('operations', jsonb_build_array(jsonb_build_object(
+    'type', 'set_temporary_state', 'id', '40000000-0000-4000-8000-000000000002',
+    'title', '疲惫', 'expiresAt', (now() + interval '1 hour')::text, 'workloadMultiplier', 0.55
+  ))),
+  now() + interval '15 minutes'
+);
+select results_eq(
+  $$ select public.confirm_agent_proposal(
+    '10000000-0000-4000-8000-000000000001', '30000000-0000-4000-8000-000000000004',
+    repeat('b', 64), repeat('d', 64), 1, 'temporary-state-confirm'
+  ) $$,
+  $$ values (jsonb_build_object(
+    'proposalId', '30000000-0000-4000-8000-000000000004'::uuid,
+    'stateVersion', 2::bigint, 'status', 'applied'
+  )) $$,
+  'language confirmation applies its temporary state atomically'
+);
+select results_eq(
+  $$ select count(*)::bigint from public.temporary_states
+     where id = '40000000-0000-4000-8000-000000000002'
+       and user_id = '10000000-0000-4000-8000-000000000001'
+       and payload->>'title' = '疲惫' and deleted_at is null $$,
+  $$ values (1::bigint) $$,
+  'confirmed temporary state is stored for the proposal owner'
+);
+select results_eq(
+  $$ select count(*)::bigint from public.sync_changes
+     where entity_type = 'temporary_state' and entity_id = '40000000-0000-4000-8000-000000000002' $$,
+  $$ values (1::bigint) $$,
+  'confirmed temporary state is emitted through the sync log'
 );
 
 select * from finish();

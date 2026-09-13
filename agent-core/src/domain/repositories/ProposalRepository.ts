@@ -10,6 +10,11 @@ export const ProposalOperationSchema = z.discriminatedUnion("type", [
     reasonCodes: z.array(z.string()).default([]),
   }).strict(),
   z.object({ type: z.literal("remove_schedule_block"), id: UUIDSchema }).strict(),
+  z.object({
+    type: z.literal("set_temporary_state"), id: UUIDSchema,
+    title: z.string().min(1).max(120), expiresAt: z.iso.datetime(),
+    workloadMultiplier: z.number().positive().max(2),
+  }).strict(),
 ]);
 
 export const StoredProposalSchema = z.object({

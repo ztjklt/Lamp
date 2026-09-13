@@ -26,10 +26,10 @@ and product/security/data-migration sign-off.
 
 ## Local verification snapshot
 
-- Agent Core: 156 tests passed; the live DeepSeek integration test is opt-in and skipped by default.
+- Agent Core: 158 tests passed; the live DeepSeek integration test is opt-in and skipped by default.
 - Deterministic Eval: 105/105 passed, including every hard-constraint and safety gate.
 - Swift package: 30/30 passed.
 - iOS UI regression: 23/23 passed on iPhone 17 Pro Simulator; the app build also passed.
-- Supabase: 25 pgTAP assertions are checked in for schema, RLS, confirmation, rollback,
+- Supabase: 30 pgTAP assertions are checked in for schema, RLS, confirmation, rollback,
   expiration, idempotency, and protected-block behavior. Runtime execution remains an
   environment gate when a local Docker/Postgres service or staging project is available.
