@@ -43,6 +43,7 @@ jobs:
 
   ios:
     runs-on: macos-15
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
@@ -68,10 +69,18 @@ jobs:
           done
           cat "$RUNNER_TEMP/lamp-agent-core.log"
           exit 1
-      - run: >-
+      - name: Run UI regression suite serially
+        run: >-
           xcodebuild test -project Lamp.xcodeproj -scheme Lamp
           -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16 Pro'
-          -only-testing:LampUITests CODE_SIGNING_ALLOWED=NO
-      - name: Print Agent Core log on failure
+          -only-testing:LampUITests -parallel-testing-enabled NO
+          -resultBundlePath "$RUNNER_TEMP/LampUITests.xcresult"
+          CODE_SIGNING_ALLOWED=NO
+      - name: Print UI and Agent Core diagnostics on failure
         if: failure()
-        run: cat "$RUNNER_TEMP/lamp-agent-core.log" || true
+        run: |
+          if [ -d "$RUNNER_TEMP/LampUITests.xcresult" ]; then
+            xcrun xcresulttool get test-results tests \
+              --path "$RUNNER_TEMP/LampUITests.xcresult" --format json || true
+          fi
+          cat "$RUNNER_TEMP/lamp-agent-core.log" || true
