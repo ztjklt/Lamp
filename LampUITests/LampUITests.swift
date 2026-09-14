@@ -1,6 +1,8 @@
 import XCTest
 
 final class LampUITests: XCTestCase {
+    private let liveAgentResponseTimeout: TimeInterval = 45
+
     func testNightlySleepAppearsInToday() {
         launch(extraArguments: ["-mock-sleep-directive", "-freeze-rest-animation"])
         app.descendants(matching: .any)["global.tellLamp"].tap()
@@ -116,7 +118,7 @@ final class LampUITests: XCTestCase {
         )).count
 
         requestDayPlan()
-        XCTAssertTrue(app.staticTexts["今日计划候选"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["今日计划候选"].waitForExistence(timeout: liveAgentResponseTimeout))
         app.descendants(matching: .any)["replan.keep"].tap()
         XCTAssertTrue(app.staticTexts["课程：金融学"].exists)
         XCTAssertEqual(app.buttons.matching(NSPredicate(
@@ -124,7 +126,7 @@ final class LampUITests: XCTestCase {
         )).count, initialTimelineCount)
 
         requestDayPlan()
-        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
         app.descendants(matching: .any)["replan.apply"].tap()
         XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 4))
         XCTAssertTrue(app.staticTexts["课程：金融学"].exists)
@@ -143,7 +145,7 @@ final class LampUITests: XCTestCase {
         ])
 
         requestDayPlan()
-        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
         app.descendants(matching: .any)["replan.apply"].tap()
         XCTAssertTrue(app.staticTexts["任务或日程已变化，请重新生成计划"].waitForExistence(timeout: 4))
         XCTAssertFalse(app.buttons["撤销"].exists)
@@ -165,7 +167,7 @@ final class LampUITests: XCTestCase {
         let initialTimelineCount = timelineCount()
 
         requestIncompleteReplan()
-        XCTAssertTrue(app.staticTexts["未完成任务的调整候选"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["未完成任务的调整候选"].waitForExistence(timeout: liveAgentResponseTimeout))
         XCTAssertEqual(timelineCount(), initialTimelineCount)
         XCTAssertEqual(english.label, englishLabel)
         XCTAssertEqual(fixed.label, fixedLabel)
@@ -190,7 +192,7 @@ final class LampUITests: XCTestCase {
         let initialTimelineCount = timelineCount()
 
         requestIncompleteReplan()
-        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
         app.descendants(matching: .any)["replan.apply"].tap()
 
         XCTAssertTrue(app.staticTexts["任务或日程已变化，请重新生成重排"].waitForExistence(timeout: 4))
@@ -218,7 +220,7 @@ final class LampUITests: XCTestCase {
         requestLanguageReplan()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(
             format: "label CONTAINS %@", "模型理解 + PLANNER 结果"
-        )).firstMatch.waitForExistence(timeout: 8))
+        )).firstMatch.waitForExistence(timeout: liveAgentResponseTimeout))
         XCTAssertTrue(app.buttons[mathID].exists)
         XCTAssertEqual(timelineCount(), initialTimelineCount)
         XCTAssertEqual(english.label, englishLabel)
@@ -247,7 +249,7 @@ final class LampUITests: XCTestCase {
         let initialTimelineCount = timelineCount()
 
         requestLanguageReplan()
-        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
         app.descendants(matching: .any)["replan.apply"].tap()
 
         XCTAssertTrue(app.staticTexts["任务或日程已变化，请重新生成调整方案"].waitForExistence(timeout: 4))
@@ -500,7 +502,7 @@ final class LampUITests: XCTestCase {
         input.tap()
         input.typeText("今天有点累，高数少学一点。")
         app.descendants(matching: .any)["tellLamp.send"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
     }
 
     private func timelineCount() -> Int {
