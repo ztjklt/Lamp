@@ -1,4 +1,19 @@
-# Lamp
+<div align="center">
+  <h1>Lamp</h1>
+  <p><strong>A personal planning agent for iPhone.</strong></p>
+  <p>不是另一个聊天窗口，而是持续回答：我现在应该做什么？</p>
+
+  ![SwiftUI](https://img.shields.io/badge/SwiftUI-iOS_18+-F05138?logo=swift&logoColor=white)
+  ![Tests](https://img.shields.io/badge/Core_Tests-24-34C759)
+  ![UI Tests](https://img.shields.io/badge/UI_Tests-17-007AFF)
+</div>
+
+<table>
+  <tr>
+    <td width="50%"><img src="artifacts/lamp-onboarding.png" alt="Lamp onboarding" /></td>
+    <td width="50%"><img src="artifacts/lamp-today-final2.png" alt="Lamp Today planning interface" /></td>
+  </tr>
+</table>
 
 Lamp 是一个原生 SwiftUI iPhone 个人规划 Agent。它的核心不是聊天，而是持续回答：**我现在应该做什么？**
 
