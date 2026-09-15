@@ -412,6 +412,269 @@ struct PlanningEngineTests {
         )
         #expect(blocks.first?.start ?? .distantPast >= start)
     }
+
+    @Test("Agent Core day-plan proposal contract decodes without committing")
+    func agentPlanProposalContract() throws {
+        let payload = Data("""
+        {
+          "schemaVersion": 1,
+          "status": "proposal",
+          "requestId": "10000000-0000-4000-8000-000000000001",
+          "sourceFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "commitRequired": true,
+          "proposal": {
+            "id": "10000000-0000-4000-8000-000000000002",
+            "candidateId": "10000000-0000-4000-8000-000000000003",
+            "title": "今日计划候选",
+            "summary": "一项任务",
+            "reason": "根据固定日程生成",
+            "blocks": [{
+              "id": "10000000-0000-4000-8000-000000000004",
+              "taskId": "10000000-0000-4000-8000-000000000005",
+              "title": "复习高数",
+              "startsAt": "2026-09-08T02:00:00Z",
+              "endsAt": "2026-09-08T03:00:00Z",
+              "replacesBlockId": null,
+              "reasonCodes": ["PREFERENCE_MATCH"]
+            }],
+            "warnings": []
+          },
+          "diagnostics": []
+        }
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(AgentPlanDayResponse.self, from: payload)
+        #expect(response.commitRequired)
+        #expect(response.status == "proposal")
+        #expect(response.proposal?.blocks.first?.title == "复习高数")
+    }
+
+    @Test("iOS day-plan request uses the versioned Agent Core field names")
+    func agentPlanRequestContract() throws {
+        let requestID = UUID(uuidString: "10000000-0000-4000-8000-000000000001")!
+        let taskID = UUID(uuidString: "10000000-0000-4000-8000-000000000002")!
+        let request = AgentPlanDayRequest(
+            requestId: requestID,
+            sourceFingerprint: String(repeating: "a", count: 64),
+            requestedAt: day,
+            timezone: "UTC",
+            locale: "zh-CN",
+            horizon: .init(start: day, end: calendar.date(byAdding: .hour, value: 12, to: day)!),
+            tasks: [.init(
+                id: taskID, goalId: nil, title: "复习高数", detail: "第二章", importance: 5,
+                deadline: nil, estimatedMinutes: 60, remainingMinutes: 60, isPaused: false,
+                isSplittable: true, minimumSessionMinutes: 20, maximumSessionMinutes: 90,
+                preferredPeriods: ["morning"], dependencyIds: [], availableWindows: []
+            )],
+            schedule: [],
+            preferences: .init(
+                preferredSleepTime: "23:30", preferredWakeTime: "08:00",
+                preferredFocusMinutes: 50, preferredBreakMinutes: 10,
+                morningStudyPreference: 0.8, eveningStudyPreference: 0.2
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let object = try #require(JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any])
+        #expect(object["schemaVersion"] as? Int == 1)
+        #expect(object["requestId"] as? String == requestID.uuidString)
+        #expect(object["focusMinutesBeforeHorizon"] as? Int == 0)
+        #expect((object["tasks"] as? [[String: Any]])?.first?["remainingMinutes"] as? Int == 60)
+    }
+
+    @Test("Agent Core incomplete-replan proposal carries event, replacement, and explanation")
+    func incompleteReplanProposalContract() throws {
+        let payload = Data("""
+        {
+          "schemaVersion": 1,
+          "status": "proposal",
+          "eventId": "20000000-0000-4000-8000-000000000001",
+          "sourceFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "commitRequired": true,
+          "proposal": {
+            "id": "20000000-0000-4000-8000-000000000002",
+            "sourceEventId": "20000000-0000-4000-8000-000000000001",
+            "scope": "local",
+            "title": "未完成任务的调整候选",
+            "summary": "只调整一项",
+            "reason": "未完成需要重新安放",
+            "blocks": [{
+              "id": "20000000-0000-4000-8000-000000000003",
+              "taskId": "20000000-0000-4000-8000-000000000004",
+              "title": "复习高数",
+              "startsAt": "2026-09-08T13:00:00Z",
+              "endsAt": "2026-09-08T14:00:00Z",
+              "replacesBlockId": "20000000-0000-4000-8000-000000000005",
+              "reasonCodes": ["TASK_INCOMPLETE_REQUIRES_REALLOCATION", "BLOCK_MOVED"]
+            }],
+            "changes": [{
+              "type": "MOVE",
+              "taskId": "20000000-0000-4000-8000-000000000004",
+              "previousBlockId": "20000000-0000-4000-8000-000000000005",
+              "proposedBlockId": "20000000-0000-4000-8000-000000000003",
+              "previousRange": { "start": "2026-09-08T11:00:00Z", "end": "2026-09-08T12:00:00Z" },
+              "proposedRange": { "start": "2026-09-08T13:00:00Z", "end": "2026-09-08T14:00:00Z" },
+              "cost": 2,
+              "reasonCodes": ["TASK_INCOMPLETE_REQUIRES_REALLOCATION", "BLOCK_MOVED"]
+            }],
+            "warnings": []
+          },
+          "diagnostics": ["local:success"]
+        }
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(AgentIncompleteReplanResponse.self, from: payload)
+        #expect(response.commitRequired)
+        #expect(response.proposal?.sourceEventId == response.eventId)
+        #expect(response.proposal?.blocks.first?.replacesBlockId?.uuidString == "20000000-0000-4000-8000-000000000005")
+        #expect(response.proposal?.changes.first?.type == "MOVE")
+    }
+
+    @Test("iOS incomplete-replan request keeps one event id and source fingerprint")
+    func incompleteReplanRequestContract() throws {
+        let eventID = UUID(uuidString: "20000000-0000-4000-8000-000000000001")!
+        let taskID = UUID(uuidString: "20000000-0000-4000-8000-000000000002")!
+        let blockID = UUID(uuidString: "20000000-0000-4000-8000-000000000003")!
+        let request = AgentIncompleteReplanRequest(
+            eventId: eventID,
+            sourceFingerprint: String(repeating: "b", count: 64),
+            occurredAt: day,
+            timezone: "UTC",
+            locale: "zh-CN",
+            planningHorizon: .init(start: day, end: calendar.date(byAdding: .day, value: 3, to: day)!),
+            taskId: taskID,
+            incompleteBlockId: blockID,
+            additionalMinutes: 60,
+            tasks: [.init(
+                id: taskID, goalId: nil, title: "复习高数", detail: "第二章", importance: 5,
+                deadline: nil, estimatedMinutes: 60, remainingMinutes: 60, isPaused: false,
+                isSplittable: true, minimumSessionMinutes: 15, maximumSessionMinutes: 90,
+                preferredPeriods: ["evening"], dependencyIds: [], availableWindows: []
+            )],
+            schedule: [.init(
+                id: blockID, taskId: taskID, title: "复习高数", startsAt: day,
+                endsAt: calendar.date(byAdding: .hour, value: 1, to: day)!, kind: "focus",
+                state: "missed", locked: false, provenance: "Lamp"
+            )],
+            preferences: .init(
+                preferredSleepTime: nil, preferredWakeTime: nil, preferredFocusMinutes: 50,
+                preferredBreakMinutes: 10, morningStudyPreference: 0.2, eveningStudyPreference: 0.8
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let object = try #require(JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any])
+        #expect(object["schemaVersion"] as? Int == 1)
+        #expect(object["eventId"] as? String == eventID.uuidString)
+        #expect(object["incompleteBlockId"] as? String == blockID.uuidString)
+        #expect(object["sourceFingerprint"] as? String == String(repeating: "b", count: 64))
+    }
+
+    @Test("Agent Core language-replan response exposes model decision and Planner changes")
+    func languageReplanResponseContract() throws {
+        let payload = Data("""
+        {
+          "schemaVersion": 1,
+          "status": "proposal",
+          "requestId": "50000000-0000-4000-8000-000000000001",
+          "sourceFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "commitRequired": true,
+          "proposal": {
+            "id": "50000000-0000-4000-8000-000000000002",
+            "sourceRequestId": "50000000-0000-4000-8000-000000000001",
+            "scope": "local",
+            "title": "让今天的“复习高数”轻一点",
+            "summary": "模型理解后由 Planner 调整",
+            "reason": "临时疲惫",
+            "blocks": [{
+              "id": "50000000-0000-4000-8000-000000000003",
+              "taskId": "50000000-0000-4000-8000-000000000004",
+              "title": "复习高数",
+              "startsAt": "2026-09-08T12:00:00Z",
+              "endsAt": "2026-09-08T12:30:00Z",
+              "replacesBlockId": "50000000-0000-4000-8000-000000000005",
+              "reasonCodes": ["USER_REQUESTED_REPLAN", "BLOCK_RESIZED"]
+            }],
+            "changes": [{
+              "type": "RESIZE",
+              "taskId": "50000000-0000-4000-8000-000000000004",
+              "previousBlockId": "50000000-0000-4000-8000-000000000005",
+              "proposedBlockId": "50000000-0000-4000-8000-000000000003",
+              "previousRange": { "start": "2026-09-08T12:00:00Z", "end": "2026-09-08T13:00:00Z" },
+              "proposedRange": { "start": "2026-09-08T12:00:00Z", "end": "2026-09-08T12:30:00Z" },
+              "cost": 1,
+              "reasonCodes": ["USER_REQUESTED_REPLAN", "BLOCK_RESIZED"]
+            }],
+            "warnings": []
+          },
+          "trace": {
+            "traceId": "50000000-0000-4000-8000-000000000006",
+            "model": { "provider": "deepseek", "model": "deepseek-chat" },
+            "intent": "replan_schedule",
+            "decision": {
+              "intent": "replan_schedule",
+              "action": "reduce_task_workload",
+              "taskId": "50000000-0000-4000-8000-000000000004",
+              "targetMinutes": 30,
+              "scope": "day",
+              "temporaryState": "tired",
+              "reasonCodes": ["USER_REPORTED_FATIGUE"],
+              "confidence": 0.96
+            },
+            "diagnostics": ["local:success"]
+          }
+        }
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(AgentLanguageReplanResponse.self, from: payload)
+        #expect(response.commitRequired)
+        #expect(response.trace.intent == "replan_schedule")
+        #expect(response.trace.decision.action == "reduce_task_workload")
+        #expect(response.trace.decision.targetMinutes == 30)
+        #expect(response.proposal?.blocks.first?.replacesBlockId?.uuidString == "50000000-0000-4000-8000-000000000005")
+        #expect(response.proposal?.changes.first?.type == "RESIZE")
+    }
+
+    @Test("iOS language-replan request preserves the natural language and state fingerprint")
+    func languageReplanRequestContract() throws {
+        let requestID = UUID(uuidString: "50000000-0000-4000-8000-000000000001")!
+        let taskID = UUID(uuidString: "50000000-0000-4000-8000-000000000002")!
+        let blockID = UUID(uuidString: "50000000-0000-4000-8000-000000000003")!
+        let end = calendar.date(byAdding: .hour, value: 4, to: day)!
+        let request = AgentLanguageReplanRequest(
+            requestId: requestID,
+            sourceFingerprint: String(repeating: "c", count: 64),
+            requestedAt: day,
+            timezone: "UTC",
+            locale: "zh-CN",
+            input: "今天有点累，高数少学一点。",
+            planningHorizon: .init(start: day, end: end),
+            tasks: [.init(
+                id: taskID, goalId: nil, title: "复习高数", detail: "第二章", importance: 5,
+                deadline: nil, estimatedMinutes: 60, remainingMinutes: 60, isPaused: false,
+                isSplittable: true, minimumSessionMinutes: 15, maximumSessionMinutes: 90,
+                preferredPeriods: ["evening"], dependencyIds: [], availableWindows: []
+            )],
+            schedule: [.init(
+                id: blockID, taskId: taskID, title: "复习高数", startsAt: day, endsAt: end,
+                kind: "focus", state: "planned", locked: false, provenance: "Lamp"
+            )],
+            preferences: .init(
+                preferredSleepTime: nil, preferredWakeTime: nil, preferredFocusMinutes: 50,
+                preferredBreakMinutes: 10, morningStudyPreference: 0.2, eveningStudyPreference: 0.8
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let object = try #require(JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any])
+        #expect(object["schemaVersion"] as? Int == 1)
+        #expect(object["requestId"] as? String == requestID.uuidString)
+        #expect(object["input"] as? String == "今天有点累，高数少学一点。")
+        #expect(object["sourceFingerprint"] as? String == String(repeating: "c", count: 64))
+    }
 }
 
 private extension BlockKind {

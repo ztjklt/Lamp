@@ -1,0 +1,86 @@
+name: Production hardening gates
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main, "codex/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  agent-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-core
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent-core/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run eval
+      - run: npm audit --omit=dev --audit-level=high
+
+  supabase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - run: supabase start
+      - run: supabase db reset --local
+      - run: supabase db lint --local --level warning
+      - run: supabase test db
+
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent-core/package-lock.json
+      - run: npm ci --prefix agent-core
+      - run: swift test
+      - run: >-
+          xcodebuild -project Lamp.xcodeproj -scheme Lamp -sdk iphonesimulator
+          -configuration Debug CODE_SIGNING_ALLOWED=NO build
+      - name: Start local Agent Core for UI tests
+        run: |
+          LAMP_AGENT_PORT=8790 npm --prefix agent-core run api > "$RUNNER_TEMP/lamp-agent-core.log" 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8790/health > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/lamp-agent-core.log"
+          exit 1
+      - name: Run UI regression suite serially
+        run: >-
+          xcodebuild test -project Lamp.xcodeproj -scheme Lamp
+          -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16 Pro'
+          -only-testing:LampUITests -parallel-testing-enabled NO
+          -resultBundlePath "$RUNNER_TEMP/LampUITests.xcresult"
+          CODE_SIGNING_ALLOWED=NO
+      - name: Print UI and Agent Core diagnostics on failure
+        if: failure()
+        run: |
+          if [ -d "$RUNNER_TEMP/LampUITests.xcresult" ]; then
+            xcrun xcresulttool get test-results tests \
+              --path "$RUNNER_TEMP/LampUITests.xcresult" --format json || true
+          fi
+          cat "$RUNNER_TEMP/lamp-agent-core.log" || true

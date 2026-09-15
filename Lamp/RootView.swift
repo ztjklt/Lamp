@@ -29,6 +29,7 @@ enum PresentedFlow: Identifiable, Equatable {
     case privacy
     case replan
     case weeklySchedulePreview
+    case planItemPreview
 
     var id: String {
         switch self {
@@ -39,6 +40,7 @@ enum PresentedFlow: Identifiable, Equatable {
         case .privacy: "privacy"
         case .replan: "replan"
         case .weeklySchedulePreview: "weekly-schedule-preview"
+        case .planItemPreview: "plan-item-preview"
         }
     }
 }
@@ -161,6 +163,10 @@ struct AppShell: View {
             guard id != nil else { return }
             presentPendingFlow(after: .milliseconds(300))
         }
+        .onChange(of: store.pendingPlanItem?.id) { _, id in
+            guard id != nil else { return }
+            presentPendingFlow(after: .milliseconds(300))
+        }
         .onChange(of: router.presentedFlow) { _, flow in
             guard flow == nil else { return }
             presentPendingFlow(after: .milliseconds(250))
@@ -197,6 +203,8 @@ struct AppShell: View {
             ReplanView()
         case .weeklySchedulePreview:
             WeeklySchedulePreviewView()
+        case .planItemPreview:
+            PlanItemConfirmationView()
         }
     }
 
@@ -208,6 +216,8 @@ struct AppShell: View {
                 router.show(.replan)
             } else if store.pendingWeeklySchedule != nil {
                 router.show(.weeklySchedulePreview)
+            } else if store.pendingPlanItem != nil {
+                router.show(.planItemPreview)
             }
         }
     }

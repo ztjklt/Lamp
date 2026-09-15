@@ -457,6 +457,13 @@ struct TemporaryState: Identifiable, Codable, Hashable, Sendable {
     var workloadMultiplier: Double
 }
 
+enum ReplanProposalMode: String, Codable, Hashable, Sendable {
+    case adjustment
+    case dayPlan
+    case incompleteTask
+    case languageReplan
+}
+
 struct ReplanProposal: Identifiable, Codable, Hashable, Sendable {
     var id: UUID = UUID()
     var title: String
@@ -464,6 +471,231 @@ struct ReplanProposal: Identifiable, Codable, Hashable, Sendable {
     var changes: [String]
     var reason: String
     var proposedBlocks: [ScheduleBlock]
+    var mode: ReplanProposalMode = .adjustment
+    var sourceFingerprint: String?
+    var sourceEventID: UUID?
+    var affectedBlockIDs: [UUID] = []
+    var temporaryStateTitle: String?
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
+    var confirmationIdempotencyKey: UUID = UUID()
+    var proposedRecurringRule: RecurringScheduleRule?
+}
+
+struct AgentPlanDayRequest: Encodable, Sendable {
+    struct TimeRange: Codable, Hashable, Sendable {
+        var start: Date
+        var end: Date
+    }
+
+    struct Task: Encodable, Sendable {
+        var id: UUID
+        var goalId: UUID?
+        var title: String
+        var detail: String
+        var importance: Int
+        var deadline: Date?
+        var estimatedMinutes: Int
+        var remainingMinutes: Int
+        var isPaused: Bool
+        var isSplittable: Bool
+        var minimumSessionMinutes: Int
+        var maximumSessionMinutes: Int
+        var preferredPeriods: [String]
+        var dependencyIds: [UUID]
+        var availableWindows: [TimeRange]
+    }
+
+    struct ExistingBlock: Encodable, Sendable {
+        var id: UUID
+        var taskId: UUID?
+        var title: String
+        var startsAt: Date
+        var endsAt: Date
+        var kind: String
+        var state: String
+        var locked: Bool
+        var provenance: String
+    }
+
+    struct Preferences: Encodable, Sendable {
+        var preferredSleepTime: String?
+        var preferredWakeTime: String?
+        var preferredFocusMinutes: Int
+        var preferredBreakMinutes: Int
+        var morningStudyPreference: Double
+        var eveningStudyPreference: Double
+    }
+
+    var schemaVersion: Int = 1
+    var requestId: UUID
+    var sourceFingerprint: String
+    var requestedAt: Date
+    var timezone: String
+    var locale: String
+    var horizon: TimeRange
+    var focusMinutesBeforeHorizon: Int = 0
+    var tasks: [Task]
+    var schedule: [ExistingBlock]
+    var preferences: Preferences
+}
+
+struct AgentPlanDayResponse: Decodable, Sendable {
+    struct Proposal: Decodable, Sendable {
+        struct Block: Decodable, Sendable {
+            var id: UUID
+            var taskId: UUID
+            var title: String
+            var startsAt: Date
+            var endsAt: Date
+            var replacesBlockId: UUID?
+            var reasonCodes: [String]
+        }
+
+        var id: UUID
+        var candidateId: UUID
+        var title: String
+        var summary: String
+        var reason: String
+        var blocks: [Block]
+        var warnings: [String]
+    }
+
+    var schemaVersion: Int
+    var status: String
+    var requestId: UUID
+    var sourceFingerprint: String
+    var commitRequired: Bool
+    var proposal: Proposal?
+    var diagnostics: [String]
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
+}
+
+struct AgentIncompleteReplanRequest: Encodable, Sendable {
+    var schemaVersion: Int = 1
+    var eventId: UUID
+    var sourceFingerprint: String
+    var occurredAt: Date
+    var timezone: String
+    var locale: String
+    var planningHorizon: AgentPlanDayRequest.TimeRange
+    var taskId: UUID
+    var incompleteBlockId: UUID
+    var additionalMinutes: Int
+    var tasks: [AgentPlanDayRequest.Task]
+    var schedule: [AgentPlanDayRequest.ExistingBlock]
+    var preferences: AgentPlanDayRequest.Preferences
+}
+
+struct AgentIncompleteReplanResponse: Decodable, Sendable {
+    struct Proposal: Decodable, Sendable {
+        struct Change: Decodable, Sendable {
+            struct TimeRange: Decodable, Sendable {
+                var start: Date
+                var end: Date
+            }
+
+            var type: String
+            var taskId: UUID?
+            var previousBlockId: UUID?
+            var proposedBlockId: UUID?
+            var previousRange: TimeRange?
+            var proposedRange: TimeRange?
+            var cost: Double
+            var reasonCodes: [String]
+        }
+
+        var id: UUID
+        var sourceEventId: UUID
+        var scope: String
+        var title: String
+        var summary: String
+        var reason: String
+        var blocks: [AgentPlanDayResponse.Proposal.Block]
+        var changes: [Change]
+        var warnings: [String]
+    }
+
+    var schemaVersion: Int
+    var status: String
+    var eventId: UUID
+    var sourceFingerprint: String
+    var commitRequired: Bool
+    var proposal: Proposal?
+    var diagnostics: [String]
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
+}
+
+struct AgentLanguageReplanRequest: Encodable, Sendable {
+    var schemaVersion: Int = 1
+    var requestId: UUID
+    var sourceFingerprint: String
+    var requestedAt: Date
+    var timezone: String
+    var locale: String
+    var input: String
+    var planningHorizon: AgentPlanDayRequest.TimeRange
+    var tasks: [AgentPlanDayRequest.Task]
+    var schedule: [AgentPlanDayRequest.ExistingBlock]
+    var preferences: AgentPlanDayRequest.Preferences
+}
+
+struct AgentLanguageReplanResponse: Decodable, Sendable {
+    struct Trace: Decodable, Sendable {
+        struct Model: Decodable, Sendable {
+            var provider: String
+            var model: String
+        }
+
+        struct Decision: Decodable, Sendable {
+            var intent: String
+            var action: String
+            var taskId: UUID
+            var targetMinutes: Int
+            var scope: String
+            var temporaryState: String
+            var reasonCodes: [String]
+            var confidence: Double
+        }
+
+        var traceId: UUID
+        var model: Model
+        var intent: String
+        var decision: Decision
+        var diagnostics: [String]
+    }
+
+    struct Proposal: Decodable, Sendable {
+        var id: UUID
+        var sourceRequestId: UUID
+        var scope: String
+        var title: String
+        var summary: String
+        var reason: String
+        var blocks: [AgentPlanDayResponse.Proposal.Block]
+        var changes: [AgentIncompleteReplanResponse.Proposal.Change]
+        var warnings: [String]
+    }
+
+    var schemaVersion: Int
+    var status: String
+    var requestId: UUID
+    var sourceFingerprint: String
+    var commitRequired: Bool
+    var proposal: Proposal?
+    var trace: Trace
+    var previewHash: String?
+    var confirmationToken: String?
+    var expectedStateVersion: Int?
+    var expiresAt: Date?
 }
 
 struct WeeklyScheduleProposal: Identifiable, Hashable, Sendable {
@@ -472,6 +704,13 @@ struct WeeklyScheduleProposal: Identifiable, Hashable, Sendable {
     var weekStart: Date
     var suggestedBlocks: [ScheduleBlock]
     var warnings: [String]
+}
+
+struct PlanItemProposal: Identifiable, Hashable, Sendable {
+    var id: UUID = UUID()
+    var item: PlanItem
+    var title: String
+    var summary: String
 }
 
 struct SchedulePeriodSummary: Equatable, Sendable {

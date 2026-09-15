@@ -1,6 +1,8 @@
 import XCTest
 
 final class LampUITests: XCTestCase {
+    private let liveAgentResponseTimeout: TimeInterval = 45
+
     func testNightlySleepAppearsInToday() {
         launch(extraArguments: ["-mock-sleep-directive", "-freeze-rest-animation"])
         app.descendants(matching: .any)["global.tellLamp"].tap()
@@ -103,6 +105,161 @@ final class LampUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["tellLamp.response"].waitForExistence(timeout: 3))
     }
 
+    func testAgentCoreDayPlanRequiresConfirmationAndPreservesFixedSchedule() {
+        var calendar = Calendar.current
+        calendar.timeZone = .current
+        let referenceDate = calendar.date(bySettingHour: 16, minute: 0, second: 0, of: .now)!
+        launch(extraArguments: ["-live-agent-core"], environment: [
+            "LAMP_AGENT_CORE_URL": "http://127.0.0.1:8790/v1/plan-day",
+            "LAMP_AGENT_REFERENCE_DATE": ISO8601DateFormatter().string(from: referenceDate)
+        ])
+        let initialTimelineCount = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "today.timeline."
+        )).count
+
+        requestDayPlan()
+        XCTAssertTrue(app.staticTexts["今日计划候选"].waitForExistence(timeout: liveAgentResponseTimeout))
+        app.descendants(matching: .any)["replan.keep"].tap()
+        XCTAssertTrue(app.staticTexts["课程：金融学"].exists)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "today.timeline."
+        )).count, initialTimelineCount)
+
+        requestDayPlan()
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
+        app.descendants(matching: .any)["replan.apply"].tap()
+        XCTAssertTrue(app.buttons["撤销"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.staticTexts["课程：金融学"].exists)
+        XCTAssertGreaterThan(app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "today.timeline."
+        )).count, initialTimelineCount)
+    }
+
+    func testAgentCoreRejectsStaleDayPlanProposal() {
+        var calendar = Calendar.current
+        calendar.timeZone = .current
+        let referenceDate = calendar.date(bySettingHour: 16, minute: 0, second: 0, of: .now)!
+        launch(extraArguments: ["-live-agent-core", "-invalidate-agent-plan-proposal"], environment: [
+            "LAMP_AGENT_CORE_URL": "http://127.0.0.1:8790/v1/plan-day",
+            "LAMP_AGENT_REFERENCE_DATE": ISO8601DateFormatter().string(from: referenceDate)
+        ])
+
+        requestDayPlan()
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
+        app.descendants(matching: .any)["replan.apply"].tap()
+        XCTAssertTrue(app.staticTexts["任务或日程已变化，请重新生成计划"].waitForExistence(timeout: 4))
+        XCTAssertFalse(app.buttons["撤销"].exists)
+        XCTAssertTrue(app.staticTexts["课程：金融学"].exists)
+    }
+
+    func testAgentCoreIncompleteReplanRequiresConfirmationAndPreservesUnrelatedSchedule() {
+        let referenceDate = Calendar.current.date(bySettingHour: 19, minute: 45, second: 0, of: .now)!
+        launch(extraArguments: ["-live-agent-core-replan", "-mock-incomplete-replan-scenario"], environment: [
+            "LAMP_AGENT_CORE_REPLAN_URL": "http://127.0.0.1:8790/v1/replan-incomplete",
+            "LAMP_AGENT_REFERENCE_DATE": ISO8601DateFormatter().string(from: referenceDate)
+        ])
+        let english = app.buttons["today.timeline.30000000-0000-4000-8000-000000000004"]
+        let fixed = app.buttons["today.timeline.30000000-0000-4000-8000-000000000005"]
+        XCTAssertTrue(english.waitForExistence(timeout: 3))
+        XCTAssertTrue(fixed.exists)
+        let englishLabel = english.label
+        let fixedLabel = fixed.label
+        let initialTimelineCount = timelineCount()
+
+        requestIncompleteReplan()
+        XCTAssertTrue(app.staticTexts["未完成任务的调整候选"].waitForExistence(timeout: liveAgentResponseTimeout))
+        XCTAssertEqual(timelineCount(), initialTimelineCount)
+        XCTAssertEqual(english.label, englishLabel)
+        XCTAssertEqual(fixed.label, fixedLabel)
+        app.descendants(matching: .any)["replan.apply"].tap()
+
+        XCTAssertTrue(app.staticTexts["未完成已记录，局部重排已应用"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.staticTexts["复习高数"].exists)
+        XCTAssertEqual(english.label, englishLabel)
+        XCTAssertEqual(fixed.label, fixedLabel)
+        XCTAssertGreaterThan(timelineCount(), initialTimelineCount)
+        XCTAssertTrue(app.buttons["撤销"].exists)
+    }
+
+    func testAgentCoreRejectsStaleIncompleteReplanProposal() {
+        let referenceDate = Calendar.current.date(bySettingHour: 19, minute: 45, second: 0, of: .now)!
+        launch(extraArguments: [
+            "-live-agent-core-replan", "-mock-incomplete-replan-scenario", "-invalidate-agent-replan-proposal"
+        ], environment: [
+            "LAMP_AGENT_CORE_REPLAN_URL": "http://127.0.0.1:8790/v1/replan-incomplete",
+            "LAMP_AGENT_REFERENCE_DATE": ISO8601DateFormatter().string(from: referenceDate)
+        ])
+        let initialTimelineCount = timelineCount()
+
+        requestIncompleteReplan()
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
+        app.descendants(matching: .any)["replan.apply"].tap()
+
+        XCTAssertTrue(app.staticTexts["任务或日程已变化，请重新生成重排"].waitForExistence(timeout: 4))
+        XCTAssertEqual(timelineCount(), initialTimelineCount)
+        XCTAssertTrue(app.buttons["today.timeline.30000000-0000-4000-8000-000000000004"].exists)
+        XCTAssertTrue(app.buttons["today.timeline.30000000-0000-4000-8000-000000000005"].exists)
+    }
+
+    func testAgentCoreLanguageReplanCombinesModelAndPlannerWithoutAutoCommit() {
+        let referenceDate = Calendar.current.date(bySettingHour: 19, minute: 45, second: 0, of: .now)!
+        launch(extraArguments: ["-live-agent-core-language", "-mock-language-replan-scenario"], environment: [
+            "LAMP_AGENT_CORE_LANGUAGE_URL": "http://127.0.0.1:8790/v1/replan-language",
+            "LAMP_AGENT_REFERENCE_DATE": ISO8601DateFormatter().string(from: referenceDate)
+        ])
+        let mathID = "today.timeline.50000000-0000-4000-8000-000000000003"
+        let english = app.buttons["today.timeline.50000000-0000-4000-8000-000000000004"]
+        let fixed = app.buttons["today.timeline.50000000-0000-4000-8000-000000000005"]
+        XCTAssertTrue(app.buttons[mathID].waitForExistence(timeout: 3))
+        XCTAssertTrue(english.exists)
+        XCTAssertTrue(fixed.exists)
+        let englishLabel = english.label
+        let fixedLabel = fixed.label
+        let initialTimelineCount = timelineCount()
+
+        requestLanguageReplan()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "模型理解 + PLANNER 结果"
+        )).firstMatch.waitForExistence(timeout: liveAgentResponseTimeout))
+        XCTAssertTrue(app.buttons[mathID].exists)
+        XCTAssertEqual(timelineCount(), initialTimelineCount)
+        XCTAssertEqual(english.label, englishLabel)
+        XCTAssertEqual(fixed.label, fixedLabel)
+        app.descendants(matching: .any)["replan.apply"].tap()
+
+        XCTAssertTrue(app.staticTexts["已按临时状态减轻点名任务"].waitForExistence(timeout: 4))
+        XCTAssertFalse(app.buttons[mathID].exists)
+        XCTAssertEqual(timelineCount(), initialTimelineCount)
+        XCTAssertEqual(english.label, englishLabel)
+        XCTAssertEqual(fixed.label, fixedLabel)
+        XCTAssertTrue(app.buttons["撤销"].exists)
+    }
+
+    func testAgentCoreRejectsStaleLanguageReplanProposal() {
+        let referenceDate = Calendar.current.date(bySettingHour: 19, minute: 45, second: 0, of: .now)!
+        launch(extraArguments: [
+            "-live-agent-core-language", "-mock-language-replan-scenario", "-invalidate-agent-language-proposal"
+        ], environment: [
+            "LAMP_AGENT_CORE_LANGUAGE_URL": "http://127.0.0.1:8790/v1/replan-language",
+            "LAMP_AGENT_REFERENCE_DATE": ISO8601DateFormatter().string(from: referenceDate)
+        ])
+        let mathID = "today.timeline.50000000-0000-4000-8000-000000000003"
+        let englishID = "today.timeline.50000000-0000-4000-8000-000000000004"
+        let fixedID = "today.timeline.50000000-0000-4000-8000-000000000005"
+        let initialTimelineCount = timelineCount()
+
+        requestLanguageReplan()
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
+        app.descendants(matching: .any)["replan.apply"].tap()
+
+        XCTAssertTrue(app.staticTexts["任务或日程已变化，请重新生成调整方案"].waitForExistence(timeout: 4))
+        XCTAssertEqual(timelineCount(), initialTimelineCount)
+        XCTAssertTrue(app.buttons[mathID].exists)
+        XCTAssertTrue(app.buttons[englishID].exists)
+        XCTAssertTrue(app.buttons[fixedID].exists)
+        XCTAssertFalse(app.buttons["撤销"].exists)
+    }
+
     func testMockVisionCandidateCanBeReviewedAndImported() {
         launch(extraArguments: ["-mock-image-analysis"])
         app.descendants(matching: .any)["global.tellLamp"].tap()
@@ -145,7 +302,7 @@ final class LampUITests: XCTestCase {
 
     func testFixedScheduleCanBeDeletedLocallyAndUndone() {
         launch()
-        let fixed = app.staticTexts["课程：金融学"]
+        let fixed = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "课程：金融学")).firstMatch
         XCTAssertTrue(fixed.waitForExistence(timeout: 3))
         fixed.tap()
         let delete = app.buttons["taskEditor.delete"]
@@ -317,10 +474,50 @@ final class LampUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["年度产品愿景"].waitForExistence(timeout: 3))
     }
 
-    private func launch(showOnboarding: Bool = false, extraArguments: [String] = []) {
+    private func requestDayPlan() {
+        let tellLamp = app.tabBars.buttons["和 Lamp 对话"]
+        XCTAssertTrue(tellLamp.waitForExistence(timeout: 3))
+        tellLamp.tap()
+        let suggestion = app.descendants(matching: .any)["tellLamp.suggestion.0"]
+        XCTAssertTrue(suggestion.waitForExistence(timeout: 3))
+        suggestion.tap()
+        app.descendants(matching: .any)["tellLamp.send"].tap()
+    }
+
+    private func requestIncompleteReplan() {
+        let missed = app.descendants(matching: .any)["today.now.missed"]
+        XCTAssertTrue(missed.waitForExistence(timeout: 3))
+        missed.tap()
+        let submit = app.buttons["missed.submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 3))
+        submit.tap()
+    }
+
+    private func requestLanguageReplan() {
+        let tellLamp = app.tabBars.buttons["和 Lamp 对话"]
+        XCTAssertTrue(tellLamp.waitForExistence(timeout: 3))
+        tellLamp.tap()
+        let input = app.descendants(matching: .any)["tellLamp.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 3))
+        input.tap()
+        input.typeText("今天有点累，高数少学一点。")
+        app.descendants(matching: .any)["tellLamp.send"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["replan.apply"].waitForExistence(timeout: liveAgentResponseTimeout))
+    }
+
+    private func timelineCount() -> Int {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "today.timeline.")).count
+    }
+
+    private func launch(
+        showOnboarding: Bool = false,
+        extraArguments: [String] = [],
+        environment: [String: String] = [:]
+    ) {
         app.launchArguments = ["-ui-testing"]
         if showOnboarding { app.launchArguments.append("-show-onboarding") }
         app.launchArguments.append(contentsOf: extraArguments)
+        app.launchEnvironment.merge(environment) { _, latest in latest }
         app.launch()
     }
 }

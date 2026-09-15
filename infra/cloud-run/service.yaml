@@ -1,0 +1,77 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: lamp-agent-core
+  labels:
+    app: lamp-agent-core
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "20"
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 40
+      timeoutSeconds: 60
+      serviceAccountName: lamp-agent-core@PROJECT_ID.iam.gserviceaccount.com
+      containers:
+        - image: asia-southeast1-docker.pkg.dev/PROJECT_ID/lamp/agent-core:IMAGE_TAG
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+            periodSeconds: 30
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: ENABLE_AUTO_COMMIT
+              value: "false"
+            - name: ENABLE_DEBUG_ENDPOINTS
+              value: "false"
+            - name: SUPABASE_URL
+              value: SUPABASE_URL_VALUE
+            - name: DEFAULT_MODEL
+              value: deepseek-v4-flash
+            - name: COMPLEX_MODEL
+              value: deepseek-v4-pro
+            - name: OTEL_SERVICE_NAME
+              value: lamp-agent-core
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: deployment.environment=production,service.namespace=lamp
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: http/protobuf
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: OTEL_COLLECTOR_ENDPOINT_VALUE
+            - name: ALLOWED_DEEPSEEK_MODELS
+              value: deepseek-v4-flash,deepseek-v4-pro
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lamp-deepseek-api-key
+                  key: latest
+            - name: SUPABASE_SERVICE_ROLE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lamp-supabase-service-role
+                  key: latest
+            - name: CONFIRMATION_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lamp-confirmation-hmac
+                  key: latest
+            - name: AGENT_CORE_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: lamp-edge-core-token
+                  key: latest

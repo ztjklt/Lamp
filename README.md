@@ -36,7 +36,10 @@ Lamp 是一个原生 SwiftUI iPhone 个人规划 Agent。它的核心不是聊�
 - 本地 JSON 离线持久化与演示数据。
 - Live Activity / Dynamic Island 的倒计时、完成和部分完成控制。
 - “打开今天”“告诉 Lamp”App Shortcuts。
-- 混合排程引擎、24 个确定性核心测试与 17 条全流程 UI 自动化测试。
+- 混合排程引擎、30 个确定性 Swift 核心测试与 23 条全流程 UI 自动化测试。
+- Agent Core 首条完整链路：根据现有任务、固定日程和偏好生成今日计划候选；客户端二次验冲突和状态指纹，明确确认前不写入。
+- Agent Core 第二条完整链路：记录“未完成”事件后只重排受影响任务；无关任务和固定日程保持不变，同一事件幂等，过期候选不能覆盖新状态。
+- Agent Core 第三条完整链路：把“今天有点累，高数少学一点”先由模型转换为受约束的结构化减量决定，再由确定性 Planner 计算具体时间变化；模型不能写日程，确认前不提交，无关安排保持不变。
 - 每晚睡眠自动排程与夜晚归属显示；睡眠卡片使用 7 帧舒缓循环插画，在降低动态效果或低电量模式下自动停在熟睡画面。
 - Supabase 匿名认证、Postgres/RLS 数据模型和 DeepSeek 工具白名单、风险分类、幂等审计边界。
 
@@ -62,11 +65,13 @@ swift test
 
 1. 创建 Supabase 项目并执行 `supabase db push`。
 2. 在 Auth 设置中开启匿名登录。
-3. 部署 `supabase/functions/agent` 与 `supabase/functions/image-schedule`。
-4. 仅在服务端配置 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`DEEPSEEK_VISION_MODEL` 和 `DEEPSEEK_BASE_URL`。
+3. 部署 `supabase/functions/agent`、`supabase/functions/image-schedule`、`supabase/functions/plan-day`、`supabase/functions/replan-incomplete` 与 `supabase/functions/replan-language`。
+4. 仅在服务端配置 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`DEEPSEEK_VISION_MODEL` 和 `DEEPSEEK_BASE_URL`；三个 Agent Core 代理另配置 `AGENT_CORE_URL` 与 `AGENT_CORE_SERVICE_TOKEN`。
 5. iOS 端只使用可公开的 Supabase publishable key；匿名 session 安全保存在 Keychain。
 
 DeepSeek 永远不获得数据库连接。图片会在本机统一方向、缩放、压缩并临时发送，不写入 Storage；服务端只审计用户、模型、图片哈希、候选数量、耗时和结果状态。
+
+本地验证可在 `agent-core` 中运行 `npm run api`。今日计划使用 `LAMP_AGENT_CORE_URL=http://127.0.0.1:8790/v1/plan-day`；未完成重排使用 `LAMP_AGENT_CORE_REPLAN_URL=http://127.0.0.1:8790/v1/replan-incomplete`；自然语言减量使用 `LAMP_AGENT_CORE_LANGUAGE_URL=http://127.0.0.1:8790/v1/replan-language`。详细边界见 `docs/architecture/0007-agent-core-day-plan-vertical-slice.md`、`docs/architecture/0008-agent-core-incomplete-replan-vertical-slice.md` 与 `docs/architecture/0009-agent-core-language-planner-vertical-slice.md`。
 
 ## DeepSeek 联调
 
